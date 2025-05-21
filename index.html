@@ -4,37 +4,81 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fernanda Voice Assistant</title>
+    <title>Conversa con Fernanda</title>
     <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; background-color: #f0f0f0; margin: 0; padding: 20px; box-sizing: border-box; }
-        .container { text-align: center; background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); width: 90%; max-width: 700px; }
-        button { padding: 15px 30px; font-size: 18px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 5px; margin-bottom: 20px; transition: background-color 0.3s; }
-        button:hover:not(:disabled) { background-color: #0056b3; }
-        button:disabled { background-color: #ccc; cursor: not-allowed; }
-        #status { margin-bottom: 15px; font-style: italic; color: #555; min-height: 20px; }
-        .output-area {
-            width: 100%; max-width: 600px; min-height: 50px; padding: 10px;
-            border: 1px solid #ccc; border-radius: 5px; background-color: #f9f9f9;
-            margin: 0 auto 15px auto; text-align: left; white-space: pre-wrap;
-            box-sizing: border-box;
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            min-height: 100vh; 
+            background-color: #2c3e50; /* Sfondo scuro */
+            color: #ecf0f1; /* Testo chiaro */
+            margin: 0; 
+            padding: 20px; 
+            box-sizing: border-box; 
         }
-        h1 { color: #333; margin-bottom: 25px;}
-        h3 { margin-top: 20px; margin-bottom: 8px; color: #333; }
+        .container { 
+            text-align: center; 
+            background-color: #34495e; /* Contenitore leggermente più chiaro */
+            padding: 40px; 
+            border-radius: 12px; 
+            box-shadow: 0 8px 16px rgba(0,0,0,0.3);
+            width: 90%;
+            max-width: 400px;
+        }
+        #controlButton { 
+            padding: 20px 30px; 
+            font-size: 20px; 
+            font-weight: bold;
+            cursor: pointer; 
+            background-color: #3498db; /* Blu */
+            color: white; 
+            border: none; 
+            border-radius: 8px; 
+            margin-top: 20px;
+            margin-bottom: 25px; 
+            transition: background-color 0.2s, transform 0.1s;
+            min-width: 250px; /* Larghezza minima per coerenza testo */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px; /* Spazio tra icona e testo */
+        }
+        #controlButton:hover:not(:disabled) { 
+            background-color: #2980b9; 
+        }
+        #controlButton:active:not(:disabled) {
+            transform: translateY(1px);
+        }
+        #controlButton:disabled { 
+            background-color: #7f8c8d; /* Grigio per disabilitato */
+            cursor: not-allowed; 
+        }
+        #statusMessage { 
+            font-style: italic; 
+            color: #bdc3c7; /* Grigio chiaro per stato */
+            min-height: 22px; 
+            font-size: 16px;
+        }
+        h1 { 
+            color: #ecf0f1; 
+            margin-bottom: 10px;
+        }
+        /* Icone base (puoi usare SVG o font icons per un look migliore) */
+        .icon-mic::before { content: "🎙️"; }
+        .icon-listening::before { content: "🤫"; }
+        .icon-thinking::before { content: "⏳"; }
+        .icon-speaking::before { content: "🗣️"; }
+        .icon-stop::before { content: "🛑"; } /* Icona per interrompere Fernanda */
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Parla con Fernanda</h1>
-        <button id="speakButton">🎙️ Parla</button>
-        <div id="status">Clicca "Parla" e attendi "In ascolto..."</div>
-
-        <h3>Hai detto:</h3>
-        <div id="transcript" class="output-area"></div>
-
-        <h3>Fernanda risponde:</h3>
-        <div id="response" class="output-area"></div>
-        
-        <audio id="audioPlayback" style="display:none;"></audio>
+        <h1>Conversa con Fernanda</h1>
+        <button id="controlButton"><span class="icon-mic"></span>Inizia</button>
+        <div id="statusMessage">Pronta quando vuoi.</div>
     </div>
     <script src="script.js"></script>
 </body>
