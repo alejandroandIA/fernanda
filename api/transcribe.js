@@ -2,10 +2,11 @@
 import OpenAI from 'openai';
 import formidable from 'formidable';
 import fs from 'fs';
+import { toFile } from 'openai/uploads'; // Importa toFile
 
 export const config = {
   api: {
-    bodyParser: false,
+    bodyParser: false, // Necessario perché formidable gestisce il parsing del corpo
   },
 };
 
@@ -37,59 +38,76 @@ export default async function handler(req, res) {
 
     const uploadedFile = audioFileArray[0];
     tempFilePathForCleanup = uploadedFile.filepath;
-    const originalFilename = uploadedFile.originalFilename || 'audio.unknown'; // Nome file dal client
+    
+    // originalFilename viene dal client (frontend) e dovrebbe avere l'estensione corretta grazie alle modifiche nel frontend.
+    const originalFilename = uploadedFile.originalFilename || 'audio.unknown'; 
 
-    console.log('--- Transcribe API (Simplified Debug) ---');
-    console.log('Received file. Original Filename:', originalFilename);
-    console.log('Mimetype from formidable:', uploadedFile.mimetype);
+    console.log('--- Transcribe API ---');
+    console.log('Original Filename from client:', originalFilename);
+    console.log('Mimetype detected by formidable:', uploadedFile.mimetype);
     console.log('Temporary file path:', tempFilePathForCleanup);
     console.log('File size:', uploadedFile.size);
-    console.log('---------------------------------------');
+    console.log('----------------------');
     
     if (uploadedFile.size === 0) {
         console.error("Uploaded file is empty.");
-        fs.unlink(tempFilePathForCleanup, () => {}); // Pulisci file vuoto
+        // Il cleanup avverrà nel blocco finally
         return res.status(400).json({ error: 'Audio file is empty.' });
     }
     
-    // Passiamo direttamente lo stream del file temporaneo.
-    // La libreria OpenAI v4 dovrebbe gestire lo stream e usare
-    // le informazioni del file (come il nome originale se passato correttamente)
-    // o il contenuto per inferire il tipo.
+    // Crea un oggetto Uploadable usando toFile.
+    // Questo passa lo stream del file insieme al suo nome originale (con estensione) all'API OpenAI,
+    // aiutando l'API a determinare correttamente il tipo di file.
+    const fileForOpenAI = await toFile(
+        fs.createReadStream(tempFilePathForCleanup),
+        originalFilename 
+    );
+
     const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tempFilePathForCleanup), // Lo stream
+      file: fileForOpenAI, // Passa l'oggetto Uploadable
       model: "whisper-1",
       language: "it",
       response_format: "json",
-      // Se il nome del file fosse critico, potremmo dover costruire un oggetto File-like
-      // ma per ora proviamo così, affidandoci alla libreria.
     });
 
     console.log('Whisper Transcription successful:', transcription.text);
     
-    fs.unlink(tempFilePathForCleanup, err => {
-      if (err) console.error("Error deleting temp file after success:", err);
-    });
-    tempFilePathForCleanup = null;
-
     res.status(200).json({ transcript: transcription.text });
 
   } catch (error) {
-    if (tempFilePathForCleanup && fs.existsSync(tempFilePathForCleanup)) {
-      fs.unlink(tempFilePathForCleanup, () => {});
-    }
     console.error('Error in /api/transcribe:', error);
     let userErrorMessage = 'Errore durante la trascrizione.';
     let statusCode = 500;
 
+    // Controlla se l'errore proviene dall'API di OpenAI
     if (error.response && error.response.data && error.response.data.error) {
-        console.error('OpenAI API Error Data:', error.response.data.error);
+        console.error('OpenAI API Error Details:', JSON.stringify(error.response.data.error, null, 2));
         userErrorMessage = error.response.data.error.message || userErrorMessage;
+        // Aggiungi il codice di errore OpenAI se disponibile e rilevante
+        if (error.response.data.error.code) {
+            userErrorMessage = `[Codice OpenAI: ${error.response.data.error.code}] ${userErrorMessage}`;
+        }
         statusCode = error.response.status || statusCode;
-    } else if (error.message) {
+
+        // Se l'errore specifico è "Invalid file format", lo rendiamo più esplicito
+        if (userErrorMessage.toLowerCase().includes("invalid file format") || 
+            (error.response.data.error.code && error.response.data.error.code === 'invalid_request_error' && userErrorMessage.toLowerCase().includes("supported format"))) {
+             userErrorMessage = `Formato file audio non valido o non riconosciuto. Formati supportati: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm. (Dettaglio: ${error.response.data.error.message})`;
+        }
+
+    } else if (error.message) { // Altri tipi di errori (es. di rete, file system)
         userErrorMessage = error.message;
-        if (error.status) statusCode = error.status;
+        if (error.status) statusCode = error.status; 
     }
+    
     res.status(statusCode).json({ error: userErrorMessage });
+  } finally {
+    // Cleanup del file temporaneo in ogni caso (successo o errore)
+    if (tempFilePathForCleanup && fs.existsSync(tempFilePathForCleanup)) {
+      fs.unlink(tempFilePathForCleanup, unlinkErr => {
+        if (unlinkErr) console.error("Error deleting temp file in finally block:", unlinkErr);
+        else console.log("Temp file deleted:", tempFilePathForCleanup);
+      });
+    }
   }
 }
