@@ -4,6 +4,7 @@
   "description": "App di conversazione vocale Fernanda",
   "private": true,
   "dependencies": {
-    "openai": "^4.40.0"
+    "openai": "^4.40.0",
+    "formidable": "^3.5.1" 
   }
 }
