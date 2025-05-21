@@ -54,13 +54,13 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Audio file is empty.' });
     }
     
-    const fileProperties = { type: uploadedFile.mimetype }; // Usa il mimetype rilevato da formidable
+    const fileProperties = { type: uploadedFile.mimetype };
     console.log('Preparing file for OpenAI with:', { filename: originalFilename, properties: fileProperties });
 
     const fileForOpenAI = await toFile(
         fs.createReadStream(tempFilePathForCleanup),
         originalFilename,
-        fileProperties // Passa il nome e il mimetype
+        fileProperties
     );
 
     const transcription = await openai.audio.transcriptions.create({
@@ -74,19 +74,27 @@ export default async function handler(req, res) {
     res.status(200).json({ transcript: transcription.text });
 
   } catch (error) {
-    console.error('Error in /api/transcribe:', error);
+    console.error('Full error object in /api/transcribe:', error); // Logga l'intero oggetto errore
     let userErrorMessage = 'Errore durante la trascrizione.';
-    let statusCode = 500;
+    let statusCode = 500; // Default a server error
 
+    // Priorità 1: status code direttamente sull'oggetto errore (es. OpenAI.APIError)
+    if (error.status && typeof error.status === 'number') {
+        statusCode = error.status;
+    }
+
+    // Priorità 2: Errore strutturato da API OpenAI
     if (error.response && error.response.data && error.response.data.error) {
         const OAIError = error.response.data.error;
         console.error('OpenAI API Error Details:', JSON.stringify(OAIError, null, 2));
-        userErrorMessage = OAIError.message || 'Errore sconosciuto da API OpenAI.';
         
+        userErrorMessage = OAIError.message || 'Errore sconosciuto da API OpenAI.';
         if (OAIError.code) {
             userErrorMessage = `[OpenAI Code: ${OAIError.code}] ${userErrorMessage}`;
         }
-        statusCode = error.response.status || statusCode;
+        // Sovrascrivi statusCode con quello specifico dell'errore OpenAI se non già impostato da error.status
+        // o se error.response.status è più specifico (dovrebbero coincidere per errori OpenAI)
+        statusCode = error.response.status || statusCode; 
 
         if (OAIError.message && (
             OAIError.message.toLowerCase().includes("invalid file format") ||
@@ -94,22 +102,23 @@ export default async function handler(req, res) {
             OAIError.message.toLowerCase().includes("format is not supported") ||
             (OAIError.code === 'invalid_request_error' && OAIError.message.toLowerCase().includes("supported format"))
         )) {
-             userErrorMessage = `[OpenAI Code: ${OAIError.code}] Formato file audio non valido o non riconosciuto da OpenAI. Dettaglio OpenAI: "${OAIError.message}". Formati supportati: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm. Assicurati che il browser registri in uno di questi formati.`;
+             userErrorMessage = `[OpenAI Code: ${OAIError.code}] Formato file audio non valido o non riconosciuto da OpenAI. Dettaglio OpenAI: "${OAIError.message}". Formati supportati: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm.`;
         }
-    } else if (error.message) {
+    } else if (error.message) { // Per altri tipi di errori (es. filesystem, formidable non OpenAI)
         userErrorMessage = error.message;
-        if (error.code === 'ENOENT') {
-            userErrorMessage = `Errore file system (server): ${error.message}`;
+        // Se statusCode è ancora il default 500, e l'errore ha un httpCode (es. da formidable)
+        if (statusCode === 500 && error.httpCode && typeof error.httpCode === 'number') {
+             statusCode = error.httpCode;
         }
-        if (error.httpCode) { // Errore da formidable, per esempio
-            statusCode = error.httpCode;
-        } else if (error.name === 'AbortError') { // Se OpenAI timeout/aborted
+        if (error.code === 'ENOENT') { 
+            userErrorMessage = `Errore file system (server): ${error.message}`;
+        } else if (error.name === 'AbortError') { 
              userErrorMessage = `Richiesta a OpenAI interrotta o timeout. Dettaglio: ${error.message}`;
              statusCode = 504; // Gateway Timeout
         }
     }
     
-    console.error(`Responding to client with status ${statusCode} and message: ${userErrorMessage}`);
+    console.error(`FINAL: Responding to client with status ${statusCode} and message: "${userErrorMessage}"`);
     res.status(statusCode).json({ error: userErrorMessage });
 
   } finally {
