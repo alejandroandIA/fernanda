@@ -5,15 +5,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const outputDiv = document.getElementById('output');
 
     let audioContext;
-    let mediaRecorder;
-    let audioChunks = [];
     let currentAudioPlayer = new Audio(); // Unico player audio riutilizzabile
-    let currentAudioUrl = null; // Per tenere traccia dell'URL dell'oggetto audio da revocare
+    let currentAudioUrl = null;
+    let unlockInProgress = false; // Flag per prevenire click multipli sullo sblocco audio
 
     // Dati audio silenzioso in base64 (un brevissimo file WAV)
     const silentAudioBase64 = "data:audio/wav;base64,UklGRjIAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
 
-    // Inizializza AudioContext (necessario per sbloccare l'audio sui browser moderni)
     function initAudioContext() {
         if (!audioContext) {
             try {
@@ -35,40 +33,57 @@ document.addEventListener('DOMContentLoaded', () => {
         return true;
     }
 
-    unlockButton.onclick = async () => {
+    unlockButton.onclick = () => {
+        if (unlockInProgress) {
+            console.log("Sblocco audio già in corso.");
+            return;
+        }
+        unlockInProgress = true;
         statusDiv.textContent = "Tentativo di abilitare l'audio...";
         console.log("Unlock Audio button cliccato.");
 
         if (!initAudioContext()) {
             statusDiv.textContent = "Impossibile inizializzare il contesto audio.";
+            unlockInProgress = false;
             return;
         }
 
-        // Tentativo di riprodurre un suono silenzioso per "sbloccare" la riproduzione audio
-        // Questo DEVE avvenire direttamente in risposta a un gesto dell'utente
-        currentAudioPlayer.src = silentAudioBase64;
-        currentAudioPlayer.load(); // Assicurati che l'audio sia caricato prima di play()
-
-        try {
-            await currentAudioPlayer.play();
-            console.log("Audio silenzioso riprodotto con successo. L'audio dovrebbe essere abilitato.");
-            statusDiv.textContent = "Audio abilitato! Clicca 'Parla' per iniziare.";
-            unlockButton.disabled = true;
-            unlockButton.style.display = 'none'; // Nascondi il pulsante dopo successo
-            startButton.disabled = false;
-        } catch (error) {
-            console.error("Errore durante la riproduzione dell'audio silenzioso:", error);
-            let userMessage = "L'audio non può essere abilitato. ";
-            if (error.name === 'NotAllowedError') {
-                userMessage += "Il browser ha bloccato la riproduzione automatica. Assicurati di aver dato i permessi per la riproduzione automatica dell'audio per questo sito nelle impostazioni del tuo browser e ricarica la pagina.";
-            } else if (error.name === 'AbortError') {
-                 userMessage += "La riproduzione è stata interrotta. Questo può succedere se cerchi di riprodurre un nuovo audio prima che il precedente sia caricato. Riprova.";
-            } else {
-                userMessage += `Dettagli errore: ${error.message}. Prova a ricaricare la pagina o controlla i permessi del browser.`;
+        const onCanPlayThrough = async () => {
+            console.log("Audio silenzioso pronto per essere riprodotto (canplaythrough).");
+            try {
+                await currentAudioPlayer.play();
+                console.log("Audio silenzioso riprodotto con successo. L'audio dovrebbe essere abilitato.");
+                statusDiv.textContent = "Audio abilitato! Clicca 'Parla' per iniziare.";
+                unlockButton.disabled = true;
+                unlockButton.style.display = 'none';
+                startButton.disabled = false;
+                unlockInProgress = false; 
+            } catch (error) {
+                console.error("Errore durante la riproduzione dell'audio silenzioso (dopo canplaythrough):", error);
+                let userMessage = "L'audio non può essere abilitato (fase play). ";
+                if (error.name === 'NotAllowedError') {
+                    userMessage += "Il browser ha bloccato la riproduzione. Assicurati dei permessi per l'autoplay e ricarica.";
+                } else {
+                    userMessage += `Dettagli errore: ${error.message}. Riprova o ricarica la pagina.`;
+                }
+                statusDiv.textContent = userMessage;
+                unlockInProgress = false;
             }
-            statusDiv.textContent = userMessage;
-            // Non disabilitare il pulsante unlock se fallisce, così l'utente può riprovare dopo aver sistemato i permessi
-        }
+        };
+
+        const onAudioLoadError = (e) => {
+            console.error("Errore caricamento audio silenzioso:", e, currentAudioPlayer.error);
+            statusDiv.textContent = "Errore nel caricare il suono test per abilitare l'audio. Riprova.";
+            unlockInProgress = false;
+        };
+        
+        // Aggiungi i listener con {once: true} così si auto-rimuovono dopo essere stati chiamati una volta
+        currentAudioPlayer.addEventListener('canplaythrough', onCanPlayThrough, { once: true });
+        currentAudioPlayer.addEventListener('error', onAudioLoadError, { once: true });
+
+        console.log("Impostazione src e load per audio silenzioso...");
+        currentAudioPlayer.src = silentAudioBase64;
+        currentAudioPlayer.load(); // Questo avvia il caricamento e dovrebbe triggerare 'canplaythrough' o 'error'
     };
 
     startButton.onclick = async () => {
@@ -78,7 +93,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log("Riproduzione audio precedente interrotta.");
         }
         if (currentAudioUrl) {
-            URL.revokeObjectURL(currentAudioUrl); // Revoca l'URL dell'oggetto precedente
+            URL.revokeObjectURL(currentAudioUrl);
             currentAudioUrl = null;
             console.log("URL oggetto audio precedente revocato.");
         }
@@ -86,38 +101,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
             statusDiv.textContent = "In ascolto...";
             startButton.disabled = true;
-            startButton.classList.add('listening'); // Aggiungi classe per feedback visivo
+            startButton.classList.add('listening');
 
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                mediaRecorder = new MediaRecorder(stream);
-                audioChunks = [];
-
-                mediaRecorder.ondataavailable = event => {
-                    audioChunks.push(event.data);
-                };
-
-                mediaRecorder.onstop = async () => {
-                    statusDiv.textContent = "Trascrizione in corso...";
-                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                    // const audioUrl = URL.createObjectURL(audioBlob); // Per debug se necessario
-                    // console.log("Audio registrato:", audioUrl);
-
-                    // Invia audio al backend per trascrizione (simulato qui, implementerai dopo)
-                    // Per ora, simuliamo una trascrizione e invio a /api/chat
-                    // const userText = "Ciao mondo, come stai?"; // Trascrizione fittizia
-                    // console.log("Testo trascritto (fittizio):", userText);
-                    // await sendToChatAPI(userText);
-
-                    // Invece di simulare, implementiamo l'invio del blob al server per la trascrizione.
-                    // Questo richiederà un endpoint API per la trascrizione.
-                    // Per ora, continuiamo ad usare SpeechRecognition API del browser se disponibile,
-                    // altrimenti questa parte andrà modificata.
-
-                    // *** LA LOGICA DI SPEECHRECOGNITION È SPOSTATA QUI SOTTO ***
-                };
-                
-                // Utilizziamo SpeechRecognition API del browser se disponibile
+                // Usiamo SpeechRecognition API del browser
                 if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
                     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     const recognition = new Recognition();
@@ -140,8 +127,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     recognition.onspeechend = () => {
                         recognition.stop();
                         statusDiv.textContent = "Trascrizione completata.";
-                        startButton.classList.remove('listening');
-                        startButton.disabled = false;
+                        // Non riabilitare startButton qui, lo fa speak() o il suo errore
                     };
 
                     recognition.onerror = (event) => {
@@ -151,18 +137,23 @@ document.addEventListener('DOMContentLoaded', () => {
                         startButton.disabled = false;
                     };
                     
+                    // Necessario richiedere i permessi del microfono prima di avviare il recognition
+                    // anche se SpeechRecognition lo fa implicitamente, è buona norma gestirlo.
+                    await navigator.mediaDevices.getUserMedia({ audio: true }); // Richiesta permesso
                     recognition.start();
 
                 } else {
-                    // Fallback se SpeechRecognition non è supportato (qui dovresti gestire la registrazione e invio del blob)
-                    statusDiv.textContent = "SpeechRecognition non supportato. La registrazione manuale non è ancora implementata.";
+                    statusDiv.textContent = "SpeechRecognition non supportato dal tuo browser.";
                     startButton.disabled = false;
                     startButton.classList.remove('listening');
                 }
 
             } catch (err) {
-                console.error("Errore durante l'accesso al microfono:", err);
+                console.error("Errore durante l'accesso al microfono o SpeechRec:", err);
                 statusDiv.textContent = "Errore accesso al microfono: " + err.message;
+                if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+                    statusDiv.textContent = "Permesso microfono negato. Abilitalo nelle impostazioni del browser.";
+                }
                 startButton.disabled = false;
                 startButton.classList.remove('listening');
             }
@@ -199,7 +190,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function speak(textToSpeak) {
         if (!textToSpeak.trim()) {
             console.log("Nessun testo da sintetizzare.");
-            statusDiv.textContent = "Pronto."; // O messaggio più appropriato
+            statusDiv.textContent = "Pronto.";
             startButton.disabled = false;
             startButton.classList.remove('listening');
             return;
@@ -214,48 +205,56 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
             if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`Errore HTTP ${response.status}: ${errorText}`);
+                const errorText = await response.text(); // Leggi come testo per errori più dettagliati da OpenAI
+                console.error("Errore API TTS:", errorText);
+                throw new Error(`Errore HTTP ${response.status} da API TTS. Dettagli: ${errorText.substring(0,100)}`);
             }
 
             const audioBlob = await response.blob();
             if (currentAudioUrl) {
-                URL.revokeObjectURL(currentAudioUrl); // Revoca l'URL dell'oggetto precedente prima di crearne uno nuovo
+                URL.revokeObjectURL(currentAudioUrl);
             }
             currentAudioUrl = URL.createObjectURL(audioBlob);
             
             currentAudioPlayer.src = currentAudioUrl;
-            currentAudioPlayer.load(); // È buona norma chiamare load() quando si cambia src
+            
+            const playPromise = currentAudioPlayer.play();
 
-            statusDiv.textContent = "Riproduzione risposta...";
+            if (playPromise !== undefined) {
+                playPromise.then(() => {
+                    console.log("Riproduzione audio AI avviata.");
+                    statusDiv.textContent = "Sto parlando..."; // Cambiato per chiarezza
+                }).catch(error => {
+                    console.error("Errore durante la riproduzione dell'audio AI:", error);
+                    statusDiv.textContent = "Errore riproduzione audio AI. Controlla console.";
+                    startButton.disabled = false;
+                    startButton.classList.remove('listening');
+                    if (currentAudioUrl) { URL.revokeObjectURL(currentAudioUrl); currentAudioUrl = null; }
+                });
+            }
 
-            // Gestione eventi per il player audio
             currentAudioPlayer.onended = () => {
                 console.log("Riproduzione audio AI completata.");
                 statusDiv.textContent = "Pronto per una nuova domanda.";
                 startButton.disabled = false;
                 startButton.classList.remove('listening');
-                if (currentAudioUrl) { // Revoca l'URL dopo la riproduzione
-                    URL.revokeObjectURL(currentAudioUrl);
-                    currentAudioUrl = null;
-                }
+                if (currentAudioUrl) { URL.revokeObjectURL(currentAudioUrl); currentAudioUrl = null; }
             };
+            // Gestione errore già in playPromise.catch, ma un listener generico sull'elemento non fa male
             currentAudioPlayer.onerror = (e) => {
-                console.error("Errore durante la riproduzione dell'audio AI:", e, currentAudioPlayer.error);
-                statusDiv.textContent = "Errore durante la riproduzione dell'audio. Controlla la console.";
+                console.error("Errore sull'elemento AudioPlayer durante la riproduzione AI:", e, currentAudioPlayer.error);
+                // Non sovrascrivere il messaggio di status se playPromise.catch lo ha già gestito.
+                // Potrebbe essere ridondante.
+                if (statusDiv.textContent.startsWith("Sto parlando...")) { // Solo se l'errore non è già stato catturato
+                     statusDiv.textContent = "Errore durante la riproduzione audio AI.";
+                }
                 startButton.disabled = false;
                 startButton.classList.remove('listening');
-                 if (currentAudioUrl) { // Revoca l'URL anche in caso di errore
-                    URL.revokeObjectURL(currentAudioUrl);
-                    currentAudioUrl = null;
-                }
+                if (currentAudioUrl) { URL.revokeObjectURL(currentAudioUrl); currentAudioUrl = null; }
             };
 
-            await currentAudioPlayer.play();
-            console.log("Riproduzione audio AI avviata.");
-
         } catch (error) {
-            console.error("Errore chiamata /api/tts o riproduzione:", error);
+            console.error("Errore chiamata /api/tts o creazione blob:", error);
             statusDiv.textContent = `Errore TTS: ${error.message}`;
             addMessageToChat("Sistema", `Errore nella sintesi vocale: ${error.message}`);
             startButton.disabled = false;
@@ -277,10 +276,9 @@ document.addEventListener('DOMContentLoaded', () => {
         messageElement.appendChild(contentElement);
         
         outputDiv.appendChild(messageElement);
-        outputDiv.scrollTop = outputDiv.scrollHeight; // Scrolla alla fine
+        outputDiv.scrollTop = outputDiv.scrollHeight;
     }
 
-    // Inizializzazione stato pulsanti
     startButton.disabled = true;
     statusDiv.textContent = "Clicca 'Abilita Audio' per iniziare.";
 });
