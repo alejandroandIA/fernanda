@@ -1,10 +1,8 @@
 // api/transcribe.js
 import OpenAI from 'openai';
-import formidable from 'formidable'; // Per gestire l'upload di file (audio)
-import fs from 'fs'; // File system per leggere e rinominare il file temporaneo
+import formidable from 'formidable';
+import fs from 'fs';
 
-// Disabilita il bodyParser predefinito di Vercel/Next.js per questo endpoint,
-// perché formidable gestirà il parsing del corpo della richiesta multipart/form-data.
 export const config = {
   api: {
     bodyParser: false,
@@ -22,88 +20,76 @@ export default async function handler(req, res) {
   }
 
   if (!process.env.OPENAI_API_KEY_FERNANDA) {
-    console.error('OPENAI_API_KEY_FERNANDA not configured for transcribe');
-    return res.status(500).json({ error: 'Server configuration error: OpenAI API key missing for transcription.' });
+    console.error('OPENAI_API_KEY_FERNANDA not configured');
+    return res.status(500).json({ error: 'Server config error: OpenAI API key missing.' });
   }
 
-  const form = formidable({ multiples: false }); // multiples: false per assicurarci un solo file per campo
-  let tempFilePathForCleanupOnError = null; // Percorso per pulizia in caso di errore
+  const form = formidable({ multiples: false });
+  let tempFilePathForCleanup = null;
 
   try {
     const [fields, files] = await form.parse(req);
-    
-    const audioFileArray = files.audio; // 'audio' è il nome del campo che invieremo dal frontend
+    const audioFileArray = files.audio;
 
     if (!audioFileArray || audioFileArray.length === 0) {
       return res.status(400).json({ error: 'No audio file uploaded.' });
     }
 
-    const uploadedFile = audioFileArray[0]; // formidable v3 restituisce un array anche per un singolo file
-    const tempFilePath = uploadedFile.filepath; // Percorso del file temporaneo di formidable
-    tempFilePathForCleanupOnError = tempFilePath; // Salva per pulizia in caso di errore prima del rename
-    
-    // Determina l'estensione corretta dal nome originale o default a 'webm'
-    const originalFilename = uploadedFile.originalFilename || 'audio.webm';
-    const fileExtension = (originalFilename.includes('.') ? originalFilename.split('.').pop() : 'webm') || 'webm';
-    
-    const newPathWithExtension = `${tempFilePath}.${fileExtension}`;
-    tempFilePathForCleanupOnError = newPathWithExtension; // Aggiorna il percorso per la pulizia
+    const uploadedFile = audioFileArray[0];
+    tempFilePathForCleanup = uploadedFile.filepath;
+    const originalFilename = uploadedFile.originalFilename || 'audio.unknown'; // Nome file dal client
 
-    console.log('--- Transcribe API Debug ---');
-    console.log('Original filename from client:', originalFilename);
+    console.log('--- Transcribe API (Simplified Debug) ---');
+    console.log('Received file. Original Filename:', originalFilename);
     console.log('Mimetype from formidable:', uploadedFile.mimetype);
-    console.log('Temporary file path from formidable:', tempFilePath);
-    console.log('New path with extension for OpenAI:', newPathWithExtension);
-    console.log('-----------------------------');
-
-    // Verifica se il file temporaneo esiste prima di rinominare
-    if (!fs.existsSync(tempFilePath)) {
-        console.error("CRITICAL ERROR: Temporary file does not exist before rename:", tempFilePath);
-        return res.status(500).json({ error: 'Server internal error: temporary file not found.' });
+    console.log('Temporary file path:', tempFilePathForCleanup);
+    console.log('File size:', uploadedFile.size);
+    console.log('---------------------------------------');
+    
+    if (uploadedFile.size === 0) {
+        console.error("Uploaded file is empty.");
+        fs.unlink(tempFilePathForCleanup, () => {}); // Pulisci file vuoto
+        return res.status(400).json({ error: 'Audio file is empty.' });
     }
-
-    fs.renameSync(tempFilePath, newPathWithExtension);
-    console.log('Renamed temporary file to:', newPathWithExtension);
-
+    
+    // Passiamo direttamente lo stream del file temporaneo.
+    // La libreria OpenAI v4 dovrebbe gestire lo stream e usare
+    // le informazioni del file (come il nome originale se passato correttamente)
+    // o il contenuto per inferire il tipo.
     const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(newPathWithExtension), // Usa il file rinominato
+      file: fs.createReadStream(tempFilePathForCleanup), // Lo stream
       model: "whisper-1",
       language: "it",
       response_format: "json",
+      // Se il nome del file fosse critico, potremmo dover costruire un oggetto File-like
+      // ma per ora proviamo così, affidandoci alla libreria.
     });
 
-    console.log('Transcription result:', transcription.text);
-
-    // Pulisci il file rinominato dopo l'uso
-    fs.unlink(newPathWithExtension, err => {
-      if (err) console.error("Error deleting renamed temp file after success:", err);
-      else console.log("Successfully deleted renamed temp file:", newPathWithExtension);
+    console.log('Whisper Transcription successful:', transcription.text);
+    
+    fs.unlink(tempFilePathForCleanup, err => {
+      if (err) console.error("Error deleting temp file after success:", err);
     });
-    tempFilePathForCleanupOnError = null; // Resetta perché la pulizia è andata a buon fine
+    tempFilePathForCleanup = null;
 
     res.status(200).json({ transcript: transcription.text });
 
   } catch (error) {
-    console.error('Error during transcription process:', error);
-    
-    // Tenta di pulire il file temporaneo (rinominato o originale) se esiste ancora
-    if (tempFilePathForCleanupOnError && fs.existsSync(tempFilePathForCleanupOnError)) {
-      fs.unlink(tempFilePathForCleanupOnError, unlinkErr => {
-        if (unlinkErr) console.error("Error deleting temp file during error handling:", unlinkErr);
-        else console.log("Successfully deleted temp file during error handling:", tempFilePathForCleanupOnError);
-      });
+    if (tempFilePathForCleanup && fs.existsSync(tempFilePathForCleanup)) {
+      fs.unlink(tempFilePathForCleanup, () => {});
     }
+    console.error('Error in /api/transcribe:', error);
+    let userErrorMessage = 'Errore durante la trascrizione.';
+    let statusCode = 500;
 
-    let userErrorMessage = 'Errore durante la trascrizione audio.';
-    if (error.response && error.response.data && error.response.data.error && error.response.data.error.message) {
-        console.error('OpenAI API Error (transcribe):', error.response.data.error.message);
-        userErrorMessage = error.response.data.error.message;
+    if (error.response && error.response.data && error.response.data.error) {
+        console.error('OpenAI API Error Data:', error.response.data.error);
+        userErrorMessage = error.response.data.error.message || userErrorMessage;
+        statusCode = error.response.status || statusCode;
     } else if (error.message) {
         userErrorMessage = error.message;
+        if (error.status) statusCode = error.status;
     }
-    
-    // Lo status code di OpenAI viene propagato se presente, altrimenti 500
-    const statusCode = error.status || (error.response ? error.response.status : 500);
     res.status(statusCode).json({ error: userErrorMessage });
   }
 }
