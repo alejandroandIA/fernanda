@@ -40,28 +40,26 @@ function updateUI(state, buttonText, buttonIconClass, statusText) {
     console.log("UI Update:", state, buttonText, statusText);
 }
 
-// Funzione helper per ottenere l'estensione dal MIME type
 function getExtensionFromMimeType(mimeType) {
-    if (!mimeType) return '.bin'; // Fallback
-    const typeSpecific = mimeType.split(';')[0].toLowerCase(); // Rimuove parametri come ';codecs=opus'
+    if (!mimeType) return '.bin';
+    const typeSpecific = mimeType.split(';')[0].toLowerCase();
     switch (typeSpecific) {
-        case 'audio/webm': return '.webm';
-        case 'audio/opus': return '.opus'; // Whisper supporta .opus direttamente
-        case 'audio/mp4': return '.mp4';   // Spesso M4A (AAC in MP4 container)
-        case 'audio/m4a': return '.m4a';
         case 'audio/wav':
-        case 'audio/wave': return '.wav';  // Alcuni browser usano audio/wave
-        case 'audio/ogg': return '.ogg';   // Spesso Opus o Vorbis in OGG container
+        case 'audio/wave': return '.wav';
+        case 'audio/webm': return '.webm';
+        case 'audio/opus': return '.opus';
+        case 'audio/mp4': return '.mp4';
+        case 'audio/m4a': return '.m4a';
+        case 'audio/ogg': return '.ogg';
         case 'audio/mpeg': return '.mp3';
-        case 'audio/aac': return '.aac';   // Whisper supporta AAC
+        case 'audio/aac': return '.aac';
         default:
             console.warn(`Nessuna estensione nota per MIME type: ${mimeType}. Tentativo di fallback.`);
-            // Tentativo di estrarre qualcosa se assomiglia a audio/x-estensione
             if (typeSpecific.startsWith('audio/x-')) {
                 const potentialExt = typeSpecific.substring(8);
                 if (potentialExt.length > 0 && potentialExt.length <= 4) return `.${potentialExt}`;
             }
-            return '.bin'; // Fallback finale se non riconosciuto
+            return '.bin';
     }
 }
 
@@ -83,24 +81,28 @@ async function initializeAudioProcessing() {
         microphoneSource = audioContext.createMediaStreamSource(globalStream);
         microphoneSource.connect(analyser);
 
-        // Determina il MIME type preferito e l'estensione associata
         let preferredMimeType = '';
-        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-            preferredMimeType = 'audio/webm;codecs=opus';
-        } else if (MediaRecorder.isTypeSupported('audio/mp4')) { // Spesso M4A (AAC)
-            preferredMimeType = 'audio/mp4';
-        } else if (MediaRecorder.isTypeSupported('audio/wav')) {
+        // ** NUOVA PRIORITÀ: Prova WAV prima, è meno compresso e più standard **
+        if (MediaRecorder.isTypeSupported('audio/wav')) {
             preferredMimeType = 'audio/wav';
+            console.log("VAD Init: Prioritizing WAV format for recording.");
+        } else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+            preferredMimeType = 'audio/webm;codecs=opus';
+            console.log("VAD Init: WAV not supported, trying webm/opus.");
+        } else if (MediaRecorder.isTypeSupported('audio/mp4')) { // Safari spesso usa questo (AAC in MP4)
+            preferredMimeType = 'audio/mp4';
+            console.log("VAD Init: WAV & webm/opus not supported, trying mp4.");
         } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
             preferredMimeType = 'audio/ogg;codecs=opus';
+            console.log("VAD Init: WAV, webm/opus, mp4 not supported, trying ogg/opus.");
         } else {
             preferredMimeType = ''; // Lascia che il browser scelga
-            console.warn("Nessun formato MIME preferito (webm, mp4, wav, ogg) supportato. Usando default browser.");
+            console.warn("VAD Init: Nessun formato MIME preferito (wav, webm, mp4, ogg) supportato. Usando default browser.");
         }
         
-        recordingMimeType = preferredMimeType; // Salva il MIME type preferito/scelto inizialmente
+        recordingMimeType = preferredMimeType;
         const initialExtension = getExtensionFromMimeType(recordingMimeType);
-        console.log("VAD Init: Preferred MIME Type:", recordingMimeType || "Browser Default", "| Initial Filename based on preference:", `${baseRecordingFilename}${initialExtension}`);
+        console.log("VAD Init: Preferred MIME Type to request:", recordingMimeType || "Browser Default", "| Initial Filename based on preference:", `${baseRecordingFilename}${initialExtension}`);
         return true;
 
     } catch (err) {
@@ -129,19 +131,20 @@ function startVAD() {
     const options = recordingMimeType ? { mimeType: recordingMimeType } : {};
     try {
         mediaRecorderForVAD = new MediaRecorder(globalStream, options);
-        console.log("MediaRecorder for VAD created. Requested MIME type:", options.mimeType || "Browser Default", "| Effective MIME type:", mediaRecorderForVAD.mimeType);
+        console.log("MediaRecorder for VAD created. Requested MIME type:", options.mimeType || "Browser Default", "| Effective MIME type from MediaRecorder:", mediaRecorderForVAD.mimeType);
 
-        // Aggiorna recordingMimeType con quello effettivo usato dal browser, se diverso o non specificato
-        if (mediaRecorderForVAD.mimeType && mediaRecorderForVAD.mimeType !== recordingMimeType) {
-            if (recordingMimeType) { // Solo se avevamo una preferenza
-                 console.warn(`MediaRecorder userà ${mediaRecorderForVAD.mimeType} invece del richiesto/preferito ${recordingMimeType}. Aggiornamento.`);
+        // Aggiorna recordingMimeType con quello effettivo usato dal browser, che è la fonte di verità
+        if (mediaRecorderForVAD.mimeType) {
+            if (recordingMimeType && mediaRecorderForVAD.mimeType !== recordingMimeType) {
+                 console.warn(`MediaRecorder userà ${mediaRecorderForVAD.mimeType} invece del richiesto ${recordingMimeType}. Aggiornamento del MIME type di riferimento.`);
             }
             recordingMimeType = mediaRecorderForVAD.mimeType; // Assicura che recordingMimeType rifletta la realtà
-        } else if (!recordingMimeType && mediaRecorderForVAD.mimeType) { // Se non avevamo preferenze e il browser ne ha scelta una
-            recordingMimeType = mediaRecorderForVAD.mimeType;
-            console.log(`MediaRecorder userà il default del browser: ${recordingMimeType}`);
+        } else if (recordingMimeType) {
+            console.warn(`MediaRecorder non ha riportato un mimeType effettivo, mantenendo il richiesto: ${recordingMimeType}`);
+        } else {
+            console.error("Critico: MediaRecorder non ha un mimeType effettivo e non ne è stato richiesto uno. Registrazione potrebbe fallire o produrre formato sconosciuto.");
+            // Potrebbe essere saggio fermare qui o usare un fallback molto generico
         }
-
 
     } catch (e) {
         console.error("Errore creazione MediaRecorder:", e, "Opzioni:", options);
@@ -167,7 +170,6 @@ function startVAD() {
         updateUI('idle', 'Errore Registrazione', 'icon-mic', 'Problema con la registrazione audio.');
     };
     mediaRecorderForVAD.start(500);
-
     processAudioLoop();
 }
 
@@ -241,23 +243,15 @@ function processAudioLoop() {
                     const chunksToSend = [...currentTurnAudioChunks];
                     currentTurnAudioChunks = [];
 
-                    let actualBlobMimeType = '';
-                    if (chunksToSend.length > 0 && chunksToSend[0].type && chunksToSend[0].type !== "") {
-                        actualBlobMimeType = chunksToSend[0].type;
-                    } else if (mediaRecorderForVAD && mediaRecorderForVAD.mimeType && mediaRecorderForVAD.mimeType !== "") {
-                        actualBlobMimeType = mediaRecorderForVAD.mimeType;
-                    } else if (recordingMimeType && recordingMimeType !== "") {
-                        actualBlobMimeType = recordingMimeType;
-                    } else {
-                        actualBlobMimeType = 'application/octet-stream';
-                        console.warn("Impossibile determinare il MIME type del blob, usando application/octet-stream.");
-                    }
+                    // Usa il recordingMimeType determinato all'avvio di MediaRecorder come tipo del blob
+                    // Questo è più affidabile del tipo del primo chunk, che a volte può essere vuoto o non specificato.
+                    const actualBlobMimeType = recordingMimeType || 'application/octet-stream';
                     
                     const audioBlob = new Blob(chunksToSend, { type: actualBlobMimeType });
                     const fileExtension = getExtensionFromMimeType(actualBlobMimeType);
                     const filenameForApi = `${baseRecordingFilename}${fileExtension}`;
 
-                    console.log(`VAD: Preparazione invio. Blob type: ${audioBlob.type}, Size: ${audioBlob.size}, Filename per API: ${filenameForApi}`);
+                    console.log(`VAD: Preparazione invio. Blob type: ${audioBlob.type} (basato su recordingMimeType: ${recordingMimeType}), Size: ${audioBlob.size}, Filename per API: ${filenameForApi}`);
                     
                     sendAudioForTranscription(audioBlob, filenameForApi);
                     return;
@@ -282,7 +276,7 @@ async function sendAudioForTranscription(audioBlob, filename) {
 
     updateUI('processing_vad_chunk', 'Termina Conversazione', 'icon-thinking', 'Trascrivo...');
     const formData = new FormData();
-    formData.append('audio', audioBlob, filename); // 'filename' ora ha l'estensione corretta
+    formData.append('audio', audioBlob, filename);
 
     try {
         const transcribeResponse = await fetch('/api/transcribe', {
@@ -292,8 +286,7 @@ async function sendAudioForTranscription(audioBlob, filename) {
 
         if (!transcribeResponse.ok) {
             const errData = await transcribeResponse.json().catch(() => ({ error: "Errore API Trascrizione (no JSON)" }));
-            // L'errore specifico "The audio file could not be decoded..." viene da qui se il server lo passa
-            throw new Error(errData.error || `Trascrizione Fallita: ${transcribeResponse.status}`);
+            throw new Error(errData.error || `Trascrizione Fallita: ${transcribeResponse.status} ${transcribeResponse.statusText}`);
         }
         const { transcript } = await transcribeResponse.json();
         console.log("Whisper transcript (VAD):", transcript);
@@ -308,8 +301,7 @@ async function sendAudioForTranscription(audioBlob, filename) {
         await processChatWithFernanda(transcript);
 
     } catch (error) {
-        console.error('Errore trascrizione (VAD):', error.message);
-        // L'errore "400 The audio file could not be decoded..." sarà parte di error.message se il backend lo propaga correttamente
+        console.error('Errore trascrizione (VAD):', error.message); 
         statusMessage.textContent = `Errore: ${error.message}. Riprova parlando.`;
         setTimeout(resumeListeningAfterFernanda, 1500);
     }
@@ -325,7 +317,7 @@ async function processChatWithFernanda(transcript) {
         });
         if (!chatResponse.ok) {
             const errData = await chatResponse.json().catch(() => ({ error: "Errore API Chat (no JSON)" }));
-            throw new Error(errData.error || `Errore Chat API: ${chatResponse.status}`);
+            throw new Error(errData.error || `Errore Chat API: ${chatResponse.status} ${chatResponse.statusText}`);
         }
         const chatData = await chatResponse.json();
         const assistantReply = chatData.reply;
@@ -342,7 +334,7 @@ async function processChatWithFernanda(transcript) {
         });
         if (!ttsResponse.ok) {
             const errData = await ttsResponse.json().catch(() => ({ error: "Errore API TTS (no JSON)" }));
-            throw new Error(errData.error || `Errore TTS API: ${ttsResponse.status}`);
+            throw new Error(errData.error || `Errore TTS API: ${ttsResponse.status} ${ttsResponse.statusText}`);
         }
         const audioFernandaBlob = await ttsResponse.blob();
         const audioUrl = URL.createObjectURL(audioFernandaBlob);
