@@ -2,11 +2,11 @@
 import OpenAI from 'openai';
 import formidable from 'formidable';
 import fs from 'fs';
-import { toFile } from 'openai/uploads'; // Importa toFile
+import { toFile } from 'openai/uploads';
 
 export const config = {
   api: {
-    bodyParser: false, // Necessario perché formidable gestisce il parsing del corpo
+    bodyParser: false,
   },
 };
 
@@ -39,39 +39,38 @@ export default async function handler(req, res) {
     const uploadedFile = audioFileArray[0];
     tempFilePathForCleanup = uploadedFile.filepath;
     
-    // originalFilename viene dal client (frontend) e dovrebbe avere l'estensione corretta grazie alle modifiche nel frontend.
     const originalFilename = uploadedFile.originalFilename || 'audio.unknown'; 
 
     console.log('--- Transcribe API ---');
-    console.log('Original Filename from client:', originalFilename);
-    console.log('Mimetype detected by formidable:', uploadedFile.mimetype);
-    console.log('Temporary file path:', tempFilePathForCleanup);
-    console.log('File size:', uploadedFile.size);
+    console.log('Received Upload:');
+    console.log('  Original Filename (from client):', originalFilename);
+    console.log('  Mimetype (detected by formidable):', uploadedFile.mimetype);
+    console.log('  Temporary file path:', tempFilePathForCleanup);
+    console.log('  File size:', uploadedFile.size);
     console.log('----------------------');
     
     if (uploadedFile.size === 0) {
         console.error("Uploaded file is empty.");
-        // Il cleanup avverrà nel blocco finally
         return res.status(400).json({ error: 'Audio file is empty.' });
     }
     
-    // Crea un oggetto Uploadable usando toFile.
-    // Questo passa lo stream del file insieme al suo nome originale (con estensione) all'API OpenAI,
-    // aiutando l'API a determinare correttamente il tipo di file.
+    const fileProperties = { type: uploadedFile.mimetype }; // Usa il mimetype rilevato da formidable
+    console.log('Preparing file for OpenAI with:', { filename: originalFilename, properties: fileProperties });
+
     const fileForOpenAI = await toFile(
         fs.createReadStream(tempFilePathForCleanup),
-        originalFilename 
+        originalFilename,
+        fileProperties // Passa il nome e il mimetype
     );
 
     const transcription = await openai.audio.transcriptions.create({
-      file: fileForOpenAI, // Passa l'oggetto Uploadable
+      file: fileForOpenAI,
       model: "whisper-1",
       language: "it",
       response_format: "json",
     });
 
     console.log('Whisper Transcription successful:', transcription.text);
-    
     res.status(200).json({ transcript: transcription.text });
 
   } catch (error) {
@@ -79,30 +78,41 @@ export default async function handler(req, res) {
     let userErrorMessage = 'Errore durante la trascrizione.';
     let statusCode = 500;
 
-    // Controlla se l'errore proviene dall'API di OpenAI
     if (error.response && error.response.data && error.response.data.error) {
-        console.error('OpenAI API Error Details:', JSON.stringify(error.response.data.error, null, 2));
-        userErrorMessage = error.response.data.error.message || userErrorMessage;
-        // Aggiungi il codice di errore OpenAI se disponibile e rilevante
-        if (error.response.data.error.code) {
-            userErrorMessage = `[Codice OpenAI: ${error.response.data.error.code}] ${userErrorMessage}`;
+        const OAIError = error.response.data.error;
+        console.error('OpenAI API Error Details:', JSON.stringify(OAIError, null, 2));
+        userErrorMessage = OAIError.message || 'Errore sconosciuto da API OpenAI.';
+        
+        if (OAIError.code) {
+            userErrorMessage = `[OpenAI Code: ${OAIError.code}] ${userErrorMessage}`;
         }
         statusCode = error.response.status || statusCode;
 
-        // Se l'errore specifico è "Invalid file format", lo rendiamo più esplicito
-        if (userErrorMessage.toLowerCase().includes("invalid file format") || 
-            (error.response.data.error.code && error.response.data.error.code === 'invalid_request_error' && userErrorMessage.toLowerCase().includes("supported format"))) {
-             userErrorMessage = `Formato file audio non valido o non riconosciuto. Formati supportati: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm. (Dettaglio: ${error.response.data.error.message})`;
+        if (OAIError.message && (
+            OAIError.message.toLowerCase().includes("invalid file format") ||
+            OAIError.message.toLowerCase().includes("could not be decoded") ||
+            OAIError.message.toLowerCase().includes("format is not supported") ||
+            (OAIError.code === 'invalid_request_error' && OAIError.message.toLowerCase().includes("supported format"))
+        )) {
+             userErrorMessage = `[OpenAI Code: ${OAIError.code}] Formato file audio non valido o non riconosciuto da OpenAI. Dettaglio OpenAI: "${OAIError.message}". Formati supportati: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm. Assicurati che il browser registri in uno di questi formati.`;
         }
-
-    } else if (error.message) { // Altri tipi di errori (es. di rete, file system)
+    } else if (error.message) {
         userErrorMessage = error.message;
-        if (error.status) statusCode = error.status; 
+        if (error.code === 'ENOENT') {
+            userErrorMessage = `Errore file system (server): ${error.message}`;
+        }
+        if (error.httpCode) { // Errore da formidable, per esempio
+            statusCode = error.httpCode;
+        } else if (error.name === 'AbortError') { // Se OpenAI timeout/aborted
+             userErrorMessage = `Richiesta a OpenAI interrotta o timeout. Dettaglio: ${error.message}`;
+             statusCode = 504; // Gateway Timeout
+        }
     }
     
+    console.error(`Responding to client with status ${statusCode} and message: ${userErrorMessage}`);
     res.status(statusCode).json({ error: userErrorMessage });
+
   } finally {
-    // Cleanup del file temporaneo in ogni caso (successo o errore)
     if (tempFilePathForCleanup && fs.existsSync(tempFilePathForCleanup)) {
       fs.unlink(tempFilePathForCleanup, unlinkErr => {
         if (unlinkErr) console.error("Error deleting temp file in finally block:", unlinkErr);
