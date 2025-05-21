@@ -6,29 +6,36 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Fernanda Voice Assistant</title>
     <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; background-color: #f0f0f0; margin: 0; }
-        button { padding: 15px 30px; font-size: 18px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 5px; margin-bottom: 20px; }
-        button:disabled { background-color: #ccc; }
-        #status { margin-bottom: 10px; font-style: italic; color: #555; }
-        #transcript, #response {
-            width: 80%; max-width: 600px; min-height: 50px; padding: 10px;
-            border: 1px solid #ccc; border-radius: 5px; background-color: white;
-            margin-bottom: 15px; white-space: pre-wrap;
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; background-color: #f0f0f0; margin: 0; padding: 20px; box-sizing: border-box; }
+        .container { text-align: center; background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); width: 90%; max-width: 700px; }
+        button { padding: 15px 30px; font-size: 18px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 5px; margin-bottom: 20px; transition: background-color 0.3s; }
+        button:hover:not(:disabled) { background-color: #0056b3; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        #status { margin-bottom: 15px; font-style: italic; color: #555; min-height: 20px; }
+        .output-area {
+            width: 100%; max-width: 600px; min-height: 50px; padding: 10px;
+            border: 1px solid #ccc; border-radius: 5px; background-color: #f9f9f9;
+            margin: 0 auto 15px auto; text-align: left; white-space: pre-wrap;
+            box-sizing: border-box;
         }
-        h3 { margin-top: 20px; margin-bottom: 5px; color: #333; }
+        h1 { color: #333; margin-bottom: 25px;}
+        h3 { margin-top: 20px; margin-bottom: 8px; color: #333; }
     </style>
 </head>
 <body>
-    <h1>Parla con Fernanda</h1>
-    <button id="speakButton">🎙️ Parla</button>
-    <div id="status">Clicca "Parla" e attendi "In ascolto..."</div>
+    <div class="container">
+        <h1>Parla con Fernanda</h1>
+        <button id="speakButton">🎙️ Parla</button>
+        <div id="status">Clicca "Parla" e attendi "In ascolto..."</div>
 
-    <h3>Hai detto:</h3>
-    <div id="transcript"></div>
+        <h3>Hai detto:</h3>
+        <div id="transcript" class="output-area"></div>
 
-    <h3>Fernanda risponde:</h3>
-    <div id="response"></div>
-
+        <h3>Fernanda risponde:</h3>
+        <div id="response" class="output-area"></div>
+        
+        <audio id="audioPlayback" style="display:none;"></audio>
+    </div>
     <script src="script.js"></script>
 </body>
 </html>
