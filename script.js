@@ -2,8 +2,7 @@ const startButton = document.getElementById('startButton');
 const statusDiv = document.getElementById('status');
 const outputDiv = document.getElementById('output');
 let recognition;
-let currentAudio = new Audio(); // Crea l'oggetto Audio una volta all'inizio
-let audioUrlToRevoke = null; // Per tenere traccia dell'URL da revocare
+let currentAudio = null; // Per tenere traccia dell'audio in riproduzione e del suo URL
 
 // Verifica se il browser supporta SpeechRecognition
 if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
@@ -14,22 +13,14 @@ if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
     recognition.maxAlternatives = 1;
 
     startButton.onclick = () => {
-        if (currentAudio && !currentAudio.paused) { // Se l'audio è in riproduzione
-            currentAudio.pause();
-            currentAudio.currentTime = 0;
-            if (audioUrlToRevoke) {
-                URL.revokeObjectURL(audioUrlToRevoke); // Revoca se interrompiamo
-                audioUrlToRevoke = null;
+        if (currentAudio && currentAudio.audio && !currentAudio.audio.paused) {
+            currentAudio.audio.pause();
+            currentAudio.audio.currentTime = 0;
+            if (currentAudio.url) {
+                URL.revokeObjectURL(currentAudio.url);
             }
+            currentAudio = null;
         }
-        // Prova a caricare un silenzio "fittizio" per "sbloccare" l'audio su Safari
-        // Questo è un trucco che a volte funziona per abilitare l'autoplay.
-        // Lo facciamo qui perché è legato all'interazione utente diretta.
-        if (currentAudio.src === "") { // Solo la prima volta o se resettato
-             // currentAudio.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA"; // Silenzio brevissimo
-             // currentAudio.load(); // Carica il silenzio
-        }
-
         try {
             statusDiv.textContent = 'In ascolto... parla pure!';
             recognition.start();
@@ -58,8 +49,14 @@ if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
             });
 
             if (!response.ok) {
-                let errorDetails = 'Errore API chat'; /* ... gestione errore ... */ throw new Error(`Errore API Chat: ${errorDetails}`);
+                let errorDetails = 'Errore API chat sconosciuto';
+                try {
+                    const errorData = await response.json();
+                    errorDetails = errorData.error || (errorData.details ? JSON.stringify(errorData.details) : response.statusText);
+                } catch (e) { errorDetails = response.statusText; }
+                throw new Error(`Errore dalla API Chat: ${errorDetails} (Status: ${response.status})`);
             }
+
             const data = await response.json();
             const aiResponse = data.reply;
 
@@ -67,38 +64,58 @@ if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
                 addMessageToChat('AI: ' + aiResponse, 'assistant');
                 speak(aiResponse);
             } else {
-                /* ... gestione no aiResponse ... */
+                addMessageToChat('AI: Non ho ricevuto una risposta valida da OpenAI.', 'assistant');
+                statusDiv.textContent = 'Problema con la risposta. Premi "Parla" per riprovare.';
                 startButton.disabled = false; startButton.textContent = "🎤 Parla";
             }
         } catch (error) {
-            /* ... gestione errore chat ... */
-            console.error('Errore API chat:', error);
-            addMessageToChat('AI: Errore (chat): ' + error.message, 'assistant');
-            statusDiv.textContent = 'Errore. Riprova.';
+            console.error('Errore nella chiamata API chat o nella gestione della risposta:', error);
+            addMessageToChat('AI: Spiacente, c\'è stato un errore (chat): ' + error.message, 'assistant');
+            statusDiv.textContent = 'Errore. Premi "Parla" per riprovare.';
             startButton.disabled = false; startButton.textContent = "🎤 Parla";
         }
     };
-    // ... resto di recognition.onspeechend, onnomatch, onerror come prima ...
+
     recognition.onspeechend = () => { recognition.stop(); };
-    recognition.onnomatch = () => { statusDiv.textContent = "Non ho capito."; startButton.disabled = false; startButton.textContent = "🎤 Parla"; };
-    recognition.onerror = (event) => { statusDiv.textContent = 'Errore riconoscimento: ' + event.error; startButton.disabled = false; startButton.textContent = "🎤 Parla"; };
+    recognition.onnomatch = () => {
+        statusDiv.textContent = "Non ho capito. Prova a parlare più chiaramente.";
+        startButton.disabled = false; startButton.textContent = "🎤 Parla";
+    };
+    recognition.onerror = (event) => {
+        let errorMessage = 'Errore nel riconoscimento: ' + event.error;
+        if (event.error === 'no-speech') { errorMessage = 'Non ho sentito nulla. Assicurati che il microfono sia attivo.'; }
+        else if (event.error === 'audio-capture') { errorMessage = 'Problema con il microfono. Controlla i permessi.'; }
+        else if (event.error === 'not-allowed' || event.error === 'aborted') { errorMessage = 'Permesso microfono negato o ascolto interrotto.'; }
+        statusDiv.textContent = errorMessage;
+        console.error("SpeechRecognition Error:", event);
+        startButton.disabled = false; startButton.textContent = "🎤 Parla";
+    };
 
+} else {
+    startButton.disabled = true;
+    statusDiv.textContent = "Il tuo browser non supporta il riconoscimento vocale.";
+    alert("Il tuo browser non supporta l'API Web Speech. Prova con Chrome o Edge aggiornati.");
+}
 
-} else { /* ... browser non supporta SpeechRecognition ... */ }
-
-function addMessageToChat(message, sender) { /* ... come prima ... */
-    const messageElement = document.createElement('div'); messageElement.classList.add('message', sender); messageElement.textContent = message; outputDiv.appendChild(messageElement); outputDiv.scrollTop = outputDiv.scrollHeight;
+function addMessageToChat(message, sender) {
+    const messageElement = document.createElement('div');
+    messageElement.classList.add('message', sender);
+    messageElement.textContent = message;
+    outputDiv.appendChild(messageElement);
+    outputDiv.scrollTop = outputDiv.scrollHeight;
 }
 
 async function speak(textToSpeak) {
-    if (!textToSpeak) { /* ... gestione no testo ... */ startButton.disabled = false; startButton.textContent = "🎤 Parla"; return; }
+    if (!textToSpeak) {
+        startButton.disabled = false; startButton.textContent = "🎤 Parla"; return;
+    }
     statusDiv.textContent = "L'AI sta parlando...";
     startButton.disabled = true; startButton.textContent = "Attendere...";
 
-    if (audioUrlToRevoke) { // Revoca l'URL precedente se esiste
-        URL.revokeObjectURL(audioUrlToRevoke);
-        audioUrlToRevoke = null;
+    if (currentAudio && currentAudio.url) { // Revoca l'URL precedente se esiste
+        URL.revokeObjectURL(currentAudio.url);
     }
+    currentAudio = null; // Resetta
 
     try {
         const response = await fetch('/api/tts', {
@@ -108,48 +125,49 @@ async function speak(textToSpeak) {
         });
 
         if (!response.ok) {
-            let errorDetails = 'Errore generazione audio'; /* ... gestione errore ... */ throw new Error(`Errore API TTS: ${errorDetails}`);
+            let errorDetails = 'Errore generazione audio';
+            try { const errorData = await response.json(); errorDetails = errorData.error?.message || JSON.stringify(errorData.details) || 'Dettagli non disponibili'; }
+            catch (e) { errorDetails = response.statusText; }
+            throw new Error(`${errorDetails} (Status: ${response.status})`);
         }
+
         const audioBlob = await response.blob();
-        audioUrlToRevoke = URL.createObjectURL(audioBlob); // Salva il nuovo URL per revocarlo dopo
-        currentAudio.src = audioUrlToRevoke; // Imposta la sorgente sull'oggetto Audio esistente
-        currentAudio.load(); // Importante: chiama load() dopo aver impostato src
-
-        // Rimuovi vecchi listener per evitare duplicazioni
-        currentAudio.oncanplaythrough = null;
-        currentAudio.onended = null;
-        currentAudio.onerror = null;
-
-        currentAudio.oncanplaythrough = () => {
-            currentAudio.play().catch(e => {
-                console.error("Errore play() in oncanplaythrough:", e);
-                statusDiv.textContent = 'Errore riproduzione (play).';
-                addMessageToChat('AI (audio play error): ' + e.message, 'assistant');
-                if (audioUrlToRevoke) { URL.revokeObjectURL(audioUrlToRevoke); audioUrlToRevoke = null; }
-                startButton.disabled = false; startButton.textContent = "🎤 Parla";
-            });
-        };
+        const audioUrl = URL.createObjectURL(audioBlob);
         
-        currentAudio.onended = () => {
+        const audio = new Audio(audioUrl);
+        currentAudio = { audio: audio, url: audioUrl }; // Salva audio e url
+
+        audio.play().catch(e => {
+            console.error("Errore durante la riproduzione dell'audio:", e);
+            statusDiv.textContent = 'Errore riproduzione audio.';
+            addMessageToChat('AI (audio play error): ' + e.message, 'assistant');
+            if (currentAudio && currentAudio.url) { URL.revokeObjectURL(currentAudio.url); }
+            currentAudio = null;
+            startButton.disabled = false; startButton.textContent = "🎤 Parla";
+        });
+
+        audio.onended = () => {
             statusDiv.textContent = 'Premi "Parla" per continuare.';
-            if (audioUrlToRevoke) { URL.revokeObjectURL(audioUrlToRevoke); audioUrlToRevoke = null; }
+            if (currentAudio && currentAudio.url) { URL.revokeObjectURL(currentAudio.url); }
+            currentAudio = null;
             startButton.disabled = false; startButton.textContent = "🎤 Parla";
         };
 
-        currentAudio.onerror = (e) => {
+        audio.onerror = (e) => {
             console.error('Errore elemento Audio:', e);
             statusDiv.textContent = 'Errore caricamento/riproduzione audio.';
-            if (audioUrlToRevoke) { URL.revokeObjectURL(audioUrlToRevoke); audioUrlToRevoke = null; }
+            if (currentAudio && currentAudio.url) { URL.revokeObjectURL(currentAudio.url); }
+            currentAudio = null;
             startButton.disabled = false; startButton.textContent = "🎤 Parla";
             addMessageToChat('AI (audio load/play error): Errore audio.', 'assistant');
         };
 
     } catch (error) {
-        /* ... gestione errore TTS ... */
-        console.error('Errore API TTS:', error);
-        addMessageToChat('AI: Errore (TTS): ' + error.message, 'assistant');
+        console.error('Errore nella sintesi vocale (chiamata a /api/tts):', error);
         statusDiv.textContent = 'Errore generazione audio.';
         startButton.disabled = false; startButton.textContent = "🎤 Parla";
-        if (audioUrlToRevoke) { URL.revokeObjectURL(audioUrlToRevoke); audioUrlToRevoke = null; }
+        addMessageToChat('AI (TTS API error): ' + error.message, 'assistant');
+        if (currentAudio && currentAudio.url) { URL.revokeObjectURL(currentAudio.url); }
+        currentAudio = null;
     }
 }
