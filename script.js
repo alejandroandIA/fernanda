@@ -1,13 +1,21 @@
 // script.js
-const speakButton = document.getElementById('speakButton');
-const statusDiv = document.getElementById('status');
-const transcriptDiv = document.getElementById('transcript');
-const responseDiv = document.getElementById('response');
-const audioPlayback = document.getElementById('audioPlayback'); // Se volessi usarlo, ma ne creiamo uno nuovo
+const controlButton = document.getElementById('controlButton');
+const statusMessage = document.getElementById('statusMessage');
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition;
-let currentAudio = null; // Per tenere traccia dell'audio corrente e poterlo fermare se serve
+let currentAudio = null;
+let isFernandaSpeaking = false;
+let currentConversationState = 'idle'; // Stati: idle, listeningToUser, processing, fernandaSpeaking
+
+// Helper per aggiornare il pulsante e lo stato
+function updateUI(state, buttonText, buttonIcon, statusText) {
+    currentConversationState = state;
+    controlButton.innerHTML = `<span class="${buttonIcon}"></span>${buttonText}`;
+    statusMessage.textContent = statusText || '';
+    controlButton.disabled = (state === 'processing'); // Disabilita solo durante l'elaborazione API
+    console.log("UI Update:", state, buttonText, statusText);
+}
 
 if (SpeechRecognition) {
     recognition = new SpeechRecognition();
@@ -16,26 +24,21 @@ if (SpeechRecognition) {
     recognition.interimResults = false;
 
     recognition.onstart = () => {
-        statusDiv.textContent = 'In ascolto...';
-        speakButton.textContent = '🤫 Ascoltando...';
-        speakButton.disabled = true;
-        transcriptDiv.textContent = '';
-        responseDiv.textContent = '';
-        if (currentAudio) {
-            currentAudio.pause(); // Ferma audio precedente se l'utente clicca di nuovo
-            currentAudio.src = ""; // Rilascia la risorsa
-        }
+        updateUI('listeningToUser', 'Parla Ora...', 'icon-listening', 'Ti ascolto...');
     };
 
     recognition.onresult = async (event) => {
-        const current = event.resultIndex;
-        const transcript = event.results[current][0].transcript.trim();
-        transcriptDiv.textContent = transcript;
-        statusDiv.textContent = 'Elaborazione risposta...';
-        speakButton.textContent = '⏳ Elaboro...';
+        const transcript = event.results[event.resultIndex][0].transcript.trim();
+        console.log("User said:", transcript);
+        if (!transcript) {
+            console.log("No speech detected or empty transcript.");
+            updateUI('idle', 'Riprova', 'icon-mic', 'Non ho sentito bene. Riprova.');
+            return;
+        }
+
+        updateUI('processing', 'Elaboro...', 'icon-thinking', 'Sto pensando...');
 
         try {
-            // 1. Invia trascrizione all'API chat
             const chatResponse = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -43,17 +46,13 @@ if (SpeechRecognition) {
             });
 
             if (!chatResponse.ok) {
-                let errorMsg = `Errore Chat API: ${chatResponse.status}`;
-                try { const errorData = await chatResponse.json(); errorMsg = errorData.error || errorMsg; } catch (e) {/* ignore */}
-                throw new Error(errorMsg);
+                const errData = await chatResponse.json().catch(() => ({error: "Errore API Chat sconosciuto"}));
+                throw new Error(errData.error || `Errore Chat API: ${chatResponse.status}`);
             }
-
             const chatData = await chatResponse.json();
             const assistantReply = chatData.reply;
-            responseDiv.textContent = assistantReply;
+            console.log("Fernanda's text reply:", assistantReply);
 
-            // 2. Invia la risposta testuale all'API TTS
-            statusDiv.textContent = 'Sintesi vocale...';
             const ttsResponse = await fetch('/api/tts', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -61,119 +60,126 @@ if (SpeechRecognition) {
             });
 
             if (!ttsResponse.ok) {
-                let errorMsg = `Errore TTS API: ${ttsResponse.status}`;
-                try { const errorData = await ttsResponse.json(); errorMsg = errorData.error || errorMsg; } catch (e) {/* ignore */}
-                throw new Error(errorMsg);
+                const errData = await ttsResponse.json().catch(() => ({error: "Errore API TTS sconosciuto"}));
+                throw new Error(errData.error || `Errore TTS API: ${ttsResponse.status}`);
             }
 
             const audioBlob = await ttsResponse.blob();
             const audioUrl = URL.createObjectURL(audioBlob);
             
-            currentAudio = new Audio(); // Crea un nuovo oggetto Audio
-            
-            const playAudio = () => {
-                currentAudio.src = audioUrl;
-                statusDiv.textContent = 'Caricamento audio...';
-
-                currentAudio.oncanplaythrough = () => {
-                    statusDiv.textContent = 'Riproduzione...';
-                    const playPromise = currentAudio.play();
-
-                    if (playPromise !== undefined) {
-                        playPromise.then(_ => {
-                            // Riproduzione iniziata con successo
-                        }).catch(error => {
-                            console.error("Errore durante audio.play():", error);
-                            statusDiv.textContent = `Audio bloccato dal browser.`;
-                            responseDiv.innerHTML += `<br><small style="color:red;">L'audio è stato bloccato. Clicca di nuovo "Parla" o abilita l'audio per questo sito.</small>`;
-                            // In uno scenario più complesso, potresti mostrare un pulsante di play manuale qui
-                            resetSpeakButton();
-                            URL.revokeObjectURL(audioUrl); // Pulisci se non può partire
-                        });
-                    }
-                };
-
-                currentAudio.onended = () => {
-                    statusDiv.textContent = 'Pronta per un\'altra domanda.';
-                    resetSpeakButton();
-                    URL.revokeObjectURL(audioUrl);
-                    currentAudio = null; // Pulisci riferimento
-                };
-
-                currentAudio.onerror = (e) => {
-                    console.error("Errore oggetto Audio:", e);
-                    statusDiv.textContent = 'Errore nel caricamento/riproduzione dell\'audio.';
-                    resetSpeakButton();
-                    URL.revokeObjectURL(audioUrl);
-                    currentAudio = null; // Pulisci riferimento
-                };
-            };
-
-            playAudio();
+            playFernandaAudio(audioUrl);
 
         } catch (error) {
             console.error('Errore nel flusso:', error);
-            statusDiv.textContent = `Errore: ${error.message}`;
-            responseDiv.textContent = '';
-            resetSpeakButton();
-            if (currentAudio) URL.revokeObjectURL(currentAudio.src); // Pulisci URL se esiste
-            currentAudio = null;
+            updateUI('idle', 'Errore', 'icon-mic', `Oops: ${error.message}. Riprova.`);
         }
     };
 
     recognition.onerror = (event) => {
         console.error('Errore SpeechRecognition:', event.error);
-        let errorMessage = `Errore riconoscimento: ${event.error}.`;
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-            errorMessage += " Assicurati di aver concesso il permesso per il microfono al browser per questo sito.";
-        } else if (event.error === 'no-speech') {
-            errorMessage = "Nessun input vocale rilevato. Parla più forte o controlla il microfono.";
-        }
-        statusDiv.textContent = errorMessage;
-        resetSpeakButton();
+        let msg = 'Errore microfono.';
+        if (event.error === 'no-speech') msg = 'Non ho sentito nulla. Parla più forte.';
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') msg = 'Permesso microfono negato.';
+        updateUI('idle', 'Riprova', 'icon-mic', msg);
     };
 
     recognition.onend = () => {
-        // Riabilita il pulsante solo se non siamo in una fase di elaborazione o riproduzione
-        // Gli stati sono gestiti più finemente in onresult e onerror
-        if (speakButton.textContent === '🤫 Ascoltando...') { // Terminato prematuramente o senza input
-             statusDiv.textContent = 'Nessun input o riconoscimento interrotto. Clicca per riprovare.';
-             resetSpeakButton();
+        // Se recognition finisce e non siamo in processing o Fernanda non sta parlando, torna a idle
+        if (currentConversationState === 'listeningToUser') {
+            console.log("Recognition ended, no result or stopped listening.");
+            // Potrebbe essere stato interrotto o semplicemente non ha catturato nulla.
+            // Se onresult non viene chiamato, l'UI rimane in "Parla Ora...", quindi qui potremmo resettare
+            // ma è meglio gestire il reset in onresult se non c'è trascrizione o in onerror.
         }
     };
 
 } else {
-    speakButton.disabled = true;
-    statusDiv.textContent = "Il tuo browser non supporta l'API SpeechRecognition.";
-    alert("Il tuo browser non supporta l'API SpeechRecognition. Prova con Chrome o Edge aggiornati.");
+    updateUI('idle', 'Non Supportato', 'icon-mic', 'Browser non supportato.');
+    controlButton.disabled = true;
 }
 
-function resetSpeakButton() {
-    speakButton.textContent = '🎙️ Parla di nuovo';
-    speakButton.disabled = false;
-}
+function playFernandaAudio(audioUrl) {
+    if (currentAudio) {
+        currentAudio.pause();
+        if(currentAudio.src) URL.revokeObjectURL(currentAudio.src);
+    }
+    currentAudio = new Audio(audioUrl);
+    isFernandaSpeaking = true;
+    updateUI('fernandaSpeaking', 'Interrompi', 'icon-stop', 'Fernanda parla...');
 
-speakButton.addEventListener('click', () => {
-    if (recognition) {
-        try {
-            if (speakButton.textContent === '🤫 Ascoltando...' || speakButton.textContent === '⏳ Elaboro...') {
-                console.log("Tentativo di interrompere riconoscimento/elaborazione in corso.");
-                recognition.stop(); // Prova a fermare il riconoscimento se attivo
-                if (currentAudio) {
-                    currentAudio.pause();
-                    currentAudio.src = "";
-                    URL.revokeObjectURL(currentAudio.src); // Attenzione, potrebbe essere già revocato
-                    currentAudio = null;
-                }
-                resetSpeakButton();
-                statusDiv.textContent = "Operazione interrotta. Clicca per riprovare.";
-                return;
-            }
-            recognition.start();
-        } catch (error) {
-            console.warn("Errore all'avvio del riconoscimento:", error);
-            statusDiv.textContent = 'Attendi un momento e riprova a parlare.';
-            resetSpeakButton();
+    currentAudio.onended = () => {
+        console.log("Fernanda finished speaking.");
+        isFernandaSpeaking = false;
+        if(currentAudio && currentAudio.src) URL.revokeObjectURL(currentAudio.src); // Pulisci URL dopo la fine
+        currentAudio = null;
+        // Solo se l'utente non ha già interrotto e iniziato a parlare di nuovo
+        if (currentConversationState === 'fernandaSpeaking') { 
+            updateUI('idle', 'Parla Ancora', 'icon-mic', 'Tocca a te.');
         }
+    };
+
+    currentAudio.onerror = (e) => {
+        console.error("Errore audio playback:", e);
+        isFernandaSpeaking = false;
+        if(currentAudio && currentAudio.src) URL.revokeObjectURL(currentAudio.src);
+        currentAudio = null;
+        updateUI('idle', 'Errore Audio', 'icon-mic', 'Problema con la riproduzione audio.');
+    };
+
+    // Tentativo di riproduzione
+    const playPromise = currentAudio.play();
+    if (playPromise !== undefined) {
+        playPromise.catch(error => {
+            console.error("Autoplay bloccato o errore play:", error);
+            isFernandaSpeaking = false;
+            // Se l'autoplay è bloccato, informiamo l'utente.
+            // Per ora, torniamo a idle, ma idealmente avremmo un pulsante "Play" manuale per l'audio di Fernanda.
+            // Questa parte andrà rivista per la robustezza su mobile.
+            updateUI('idle', 'Audio Bloccato', 'icon-mic', 'Audio bloccato. Abilita autoplay o clicca per riprovare.');
+            if(currentAudio && currentAudio.src) URL.revokeObjectURL(currentAudio.src);
+            currentAudio = null;
+        });
+    }
+}
+
+controlButton.addEventListener('click', () => {
+    if (!SpeechRecognition) return;
+
+    console.log("Button clicked. Current state:", currentConversationState);
+
+    if (currentConversationState === 'idle' || currentConversationState === 'error') {
+        try {
+            recognition.start();
+        } catch (e) {
+            console.error("Errore avvio recognition:", e);
+            updateUI('idle', 'Riprova', 'icon-mic', 'Errore avvio microfono.');
+        }
+    } else if (currentConversationState === 'listeningToUser') {
+        // Utente clicca mentre sta parlando -> ferma l'ascolto e processa (o considera "fatto")
+        recognition.stop(); 
+        // onresult dovrebbe poi essere chiamato se c'è qualcosa, altrimenti onend
+        // L'UI si aggiornerà di conseguenza
+        updateUI('processing', 'Elaboro...', 'icon-thinking', 'Ok, ci penso...');
+    } else if (currentConversationState === 'fernandaSpeaking') {
+        // Utente interrompe Fernanda
+        if (currentAudio) {
+            currentAudio.pause();
+            isFernandaSpeaking = false;
+            if(currentAudio.src) URL.revokeObjectURL(currentAudio.src);
+            currentAudio = null; // Rilascia audio corrente
+        }
+        // E inizia subito ad ascoltare l'utente
+        try {
+            recognition.start(); // L'UI si aggiornerà in recognition.onstart
+        } catch (e) {
+            console.error("Errore avvio recognition dopo interruzione:", e);
+            updateUI('idle', 'Riprova', 'icon-mic', 'Errore avvio microfono.');
+        }
+    } else if (currentConversationState === 'processing') {
+        // Non fare nulla se cliccato mentre è in processing, il pulsante è già disabilitato.
+        // O, se non fosse disabilitato, si potrebbe implementare una logica di "cancella richiesta".
     }
 });
+
+// Inizializza UI
+updateUI('idle', 'Inizia', 'icon-mic', 'Pronta quando vuoi.');
