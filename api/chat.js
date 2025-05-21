@@ -24,7 +24,7 @@ export default async function handler(req, res) {
                 'Authorization': `Bearer ${OPENAI_API_KEY}`
             },
             body: JSON.stringify({
-                model: 'gpt-4o-realtime-preview-2024-10-01', // Il tuo modello
+                model: 'gpt-4o', // Il tuo modello
                 messages: [
                     { role: 'system', content: 'Sei un assistente AI utile e conciso, che risponde in italiano.' },
                     { role: 'user', content: userMessage }
