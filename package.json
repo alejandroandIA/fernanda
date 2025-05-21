@@ -1,0 +1,9 @@
+{
+  "name": "fernanda-app",
+  "version": "1.0.0",
+  "description": "App di conversazione vocale Fernanda",
+  "private": true,
+  "dependencies": {
+    "openai": "^4.40.0"
+  }
+}
