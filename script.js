@@ -4,16 +4,11 @@ const statusMessage = document.getElementById('statusMessage');
 
 let mediaRecorder;
 let audioChunks = [];
-// Rimuoviamo per ora il silenceTimeout per semplificare, lo stop sarà manuale
-// let silenceTimeout;
-// const SILENCE_THRESHOLD_MS = 2000;
 
-let currentAudio = null; // Per l'audio di risposta di Fernanda
+let currentAudio = null; 
 let isFernandaSpeaking = false;
-// Stati: idle, awaitingUserInput, recording, processingTranscription, processingChat, fernandaSpeaking
 let currentConversationState = 'idle'; 
 
-// Helper per aggiornare il pulsante e lo stato
 function updateUI(state, buttonText, buttonIcon, statusText) {
     currentConversationState = state;
     controlButton.innerHTML = `<span class="${buttonIcon}"></span>${buttonText}`;
@@ -24,32 +19,41 @@ function updateUI(state, buttonText, buttonIcon, statusText) {
 
 async function startOrStopRecording() {
     if (currentConversationState === 'idle' || currentConversationState === 'awaitingUserInput') {
-        // --- INIZIA REGISTRAZIONE ---
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             
-            // Tentativo di forzare WAV, altrimenti default (che spesso è webm/opus)
-            let options = { mimeType: 'audio/wav' };
-            let recordingFilename = 'user_audio.wav';
+            let options = {}; // Inizia con opzioni vuote
+            let recordingFilename = 'user_audio.mp4'; // Default a .mp4 se nessun tipo è specificato/supportato
+            let explicitMimeType = '';
 
-            if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                console.warn(`${options.mimeType} (WAV) not supported, trying audio/webm;codecs=opus.`);
-                options = { mimeType: 'audio/webm;codecs=opus' };
+            // Prova i tipi preferiti
+            if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+                options.mimeType = 'audio/webm;codecs=opus';
                 recordingFilename = 'user_audio.webm';
-                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                    console.warn(`${options.mimeType} (WEBM/Opus) not supported, trying browser default.`);
-                    delete options.mimeType; // Lascia che il browser scelga
-                    recordingFilename = 'user_audio.unknown'; // L'estensione sarà incerta
-                }
+                explicitMimeType = options.mimeType;
+            } else if (MediaRecorder.isTypeSupported('audio/wav')) {
+                options.mimeType = 'audio/wav';
+                recordingFilename = 'user_audio.wav';
+                explicitMimeType = options.mimeType;
+            } else if (MediaRecorder.isTypeSupported('audio/mp4')) { // Fallback a mp4 se webm e wav non vanno
+                options.mimeType = 'audio/mp4';
+                recordingFilename = 'user_audio.mp4';
+                explicitMimeType = options.mimeType;
+            } else {
+                // Lascia che il browser scelga il default, ma assumi mp4 per il nome file
+                // perché è un output comune di default per Safari se altri non sono specificati.
+                console.warn("Nessun formato preferito supportato (webm, wav, mp4). Usando default del browser, nominando come .mp4.");
+                // options.mimeType non viene impostato, MediaRecorder userà il suo default
             }
+            
             console.log("Using MediaRecorder options:", options, "Filename for upload:", recordingFilename);
             
-            mediaRecorder = new MediaRecorder(stream, options);
+            mediaRecorder = new MediaRecorder(stream, options); // Passa le opzioni (potrebbero essere vuote)
             audioChunks = [];
 
             mediaRecorder.ondataavailable = event => {
                 audioChunks.push(event.data);
-                console.log("Audio chunk received, size:", event.data.size);
+                console.log("Audio chunk received, size:", event.data.size, "type:", event.data.type);
             };
 
             mediaRecorder.onstart = () => {
@@ -66,12 +70,15 @@ async function startOrStopRecording() {
                 }
 
                 updateUI('processingTranscription', 'Trascrivo...', 'icon-thinking', 'Invio audio...');
-                // Usa il tipo MIME effettivo del primo chunk se disponibile, altrimenti quello delle opzioni
-                const actualMimeType = audioChunks[0].type || options.mimeType || 'audio/webm';
+                
+                // Determina il tipo MIME del blob: usa il tipo dal primo chunk se disponibile, 
+                // altrimenti l'explicitMimeType che abbiamo tentato di impostare, 
+                // o fallback a un tipo generico se MediaRecorder ha usato il suo default.
+                const actualMimeType = audioChunks[0].type || explicitMimeType || 'application/octet-stream'; 
+                console.log("Blob will be created with MIME type:", actualMimeType);
                 const audioBlob = new Blob(audioChunks, { type: actualMimeType });
                 
                 const formData = new FormData();
-                // Usa il recordingFilename determinato prima
                 formData.append('audio', audioBlob, recordingFilename); 
 
                 try {
@@ -82,7 +89,8 @@ async function startOrStopRecording() {
 
                     if (!transcribeResponse.ok) {
                         const errData = await transcribeResponse.json().catch(() => ({error: "Errore API Trascrizione"}));
-                        throw new Error(errData.transcript || errData.error || `Trascrizione Fallita: ${transcribeResponse.status}`);
+                        // L'errore dettagliato viene già loggato dal backend e mostrato all'utente
+                        throw new Error(errData.error || `Trascrizione Fallita: ${transcribeResponse.status}`);
                     }
                     const { transcript } = await transcribeResponse.json();
                     console.log("Whisper transcript:", transcript);
@@ -93,7 +101,9 @@ async function startOrStopRecording() {
                     }
                     processChat(transcript);
                 } catch (error) {
-                    console.error('Errore trascrizione (frontend):', error);
+                    console.error('Errore trascrizione (frontend):', error.message); // Logga solo il messaggio di errore qui
+                    // L'errore completo dovrebbe essere visibile nella risposta di rete e loggato dal backend.
+                    // Aggiorna UI con il messaggio di errore ricevuto (che potrebbe essere quello da OpenAI)
                     updateUI('awaitingUserInput', 'Errore Trasc.', 'icon-mic', `${error.message}. Riprova.`);
                 }
             };
@@ -110,26 +120,21 @@ async function startOrStopRecording() {
         }
 
     } else if (currentConversationState === 'recording') {
-        // --- FERMA REGISTRAZIONE MANUALMENTE ---
         if (mediaRecorder && mediaRecorder.state === "recording") {
-            mediaRecorder.stop(); // onstop gestirà il resto
+            mediaRecorder.stop(); 
         }
     } else if (currentConversationState === 'fernandaSpeaking') {
-        // --- INTERROMPI FERNANDA E PREPARATI A PARLARE ---
         if (currentAudio) {
             currentAudio.pause();
             isFernandaSpeaking = false;
             if(currentAudio.src) URL.revokeObjectURL(currentAudio.src);
             currentAudio = null;
         }
-        // Non avviare la registrazione automaticamente qui, l'utente cliccherà di nuovo "Inizia"
         updateUI('awaitingUserInput', 'Parla Ora', 'icon-mic', 'Tocca a te.');
     }
 }
-
-
+// --- Le funzioni processChat e playFernandaAudio rimangono IDENTICHE alla versione precedente ---
 async function processChat(transcript) {
-    // ... (questa funzione rimane identica alla versione precedente)
     updateUI('processingChat', 'Penso...', 'icon-thinking', 'Ottima domanda, ci penso...');
     try {
         const chatResponse = await fetch('/api/chat', {
@@ -167,14 +172,13 @@ async function processChat(transcript) {
 }
 
 function playFernandaAudio(audioUrl) {
-    // ... (questa funzione rimane identica alla versione precedente)
     if (currentAudio) {
         currentAudio.pause();
         if(currentAudio.src) URL.revokeObjectURL(currentAudio.src);
     }
     currentAudio = new Audio(audioUrl);
     isFernandaSpeaking = true;
-    updateUI('fernandaSpeaking', 'Interrompi', 'icon-stop', 'Fernanda parla...'); // Pulsante per interrompere
+    updateUI('fernandaSpeaking', 'Interrompi', 'icon-stop', 'Fernanda parla...');
 
     currentAudio.onended = () => {
         console.log("Fernanda finished speaking.");
@@ -205,10 +209,9 @@ function playFernandaAudio(audioUrl) {
         });
     }
 }
-
+// ---------------------------------------------------------------------------------------------
 controlButton.addEventListener('click', startOrStopRecording);
 
-// Inizializza UI
 if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
     updateUI('idle', 'Inizia', 'icon-mic', 'Pronta quando vuoi.');
 } else {
