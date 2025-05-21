@@ -24,26 +24,33 @@ export default async function handler(req, res) {
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini", // Usiamo gpt-4o-mini per velocità e costi, puoi cambiarlo
+      // --- MODIFICA QUI SOTTO ---
+      model: "gpt-4o", // Utilizziamo gpt-4o che è attivo sul tuo account
+      // --- FINE MODIFICA ---
       messages: [
-        { role: "system", content: "Sei Fernanda, un'assistente vocale AI amichevole, utile e concisa. Rispondi in italiano." },
+        { role: "system", content: "Sei Fernanda, un'assistente vocale AI amichevole, utile e concisa. Rispondi in italiano, in modo naturale come se stessi parlando." },
         { role: "user", content: prompt }
       ],
-      temperature: 0.7, // Un po' di creatività ma non troppa
-      max_tokens: 150,  // Limita la lunghezza della risposta
+      temperature: 0.7, 
+      max_tokens: 150,  
     });
 
     const reply = completion.choices[0].message.content;
     res.status(200).json({ reply });
 
   } catch (error) {
-    console.error('OpenAI API Error (chat):', error.response ? error.response.data : error.message);
+    // Questa parte logga l'errore sui server di Vercel, utile per il debug
+    console.error('OpenAI API Error (chat):', error.status, error.message, error.response ? error.response.data : 'No response data');
+    
+    // Questo è il messaggio che l'utente potrebbe vedere se non gestito diversamente nel frontend
     let userErrorMessage = 'Errore nel contattare il servizio AI (chat).';
     if (error.status === 401) {
         userErrorMessage = 'Errore di autenticazione con il servizio AI. Controlla la chiave API.';
+    } else if (error.status === 403) { // Errore specifico per permessi/modello
+        userErrorMessage = `Il progetto non ha accesso al modello AI specificato. (Errore: ${error.status})`;
     } else if (error.status === 429) {
         userErrorMessage = 'Hai superato i limiti di richieste al servizio AI. Riprova più tardi.';
     }
-    res.status(500).json({ error: userErrorMessage });
+    res.status(error.status || 500).json({ error: userErrorMessage });
   }
 }
