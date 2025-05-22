@@ -6,9 +6,9 @@ const statusMessage = document.getElementById('statusMessage');
 let audioContext;
 let analyser;
 let microphoneSource;
-const VAD_SILENCE_THRESHOLD = 0.01; // Da tarare: sensibilità al volume (0-1)
-const VAD_SILENCE_DURATION_MS = 1800; // Millisecondi di silenzio prima di considerare l'utente aver finito
-const VAD_SPEECH_MIN_DURATION_MS = 300; // Minima durata del parlato per inviare
+const VAD_SILENCE_THRESHOLD = 0.01;
+const VAD_SILENCE_DURATION_MS = 1800;
+const VAD_SPEECH_MIN_DURATION_MS = 300;
 let silenceStartTime = 0;
 let speaking = false;
 let speechStartTime = 0;
@@ -17,8 +17,8 @@ let vadProcessTimeout = null;
 
 let currentTurnAudioChunks = [];
 let mediaRecorderForVAD;
-let recordingMimeType = ''; // MIME type effettivo o preferito per MediaRecorder
-const baseRecordingFilename = 'user_vad_audio'; // Nome base, l'estensione sarà aggiunta dinamicamente
+let recordingMimeType = ''; // Stabile, impostato da initializeAudioProcessing
+const baseRecordingFilename = 'user_vad_audio';
 
 // --- Cronologia Conversazione ---
 let conversationHistory = [];
@@ -44,23 +44,21 @@ function getExtensionFromMimeType(mimeType) {
     if (!mimeType) return '.bin';
     const typeSpecific = mimeType.split(';')[0].toLowerCase();
     switch (typeSpecific) {
-        case 'audio/wav':
-        case 'audio/wave': return '.wav';
+        case 'audio/wav': case 'audio/wave': return '.wav';
         case 'audio/webm': return '.webm';
-        case 'audio/opus': return '.opus'; // Spesso dentro webm o ogg
+        case 'audio/opus': return '.opus';
         case 'audio/mp4': return '.mp4';
-        case 'audio/m4a': return '.m4a'; // m4a è spesso audio/mp4 o audio/aac
+        case 'audio/m4a': return '.m4a';
         case 'audio/ogg': return '.ogg';
         case 'audio/mpeg': return '.mp3';
         case 'audio/aac': return '.aac';
         default:
             console.warn(`Nessuna estensione nota per MIME type: ${mimeType}. Tentativo di fallback.`);
-            // Per tipi come audio/x-matroska, audio/x-aac
             if (typeSpecific.startsWith('audio/x-')) {
                 const potentialExt = typeSpecific.substring(8);
                 if (potentialExt.length > 0 && potentialExt.length <= 4) return `.${potentialExt}`;
             }
-            return '.bin'; // Fallback generico
+            return '.bin';
     }
 }
 
@@ -70,7 +68,6 @@ async function initializeAudioProcessing() {
         controlButton.disabled = true;
         return false;
     }
-
     try {
         globalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -83,36 +80,17 @@ async function initializeAudioProcessing() {
         microphoneSource.connect(analyser);
 
         let preferredMimeType = '';
-        // Priorità dei formati:
-        if (MediaRecorder.isTypeSupported('audio/wav')) {
-            preferredMimeType = 'audio/wav';
-            console.log("VAD Init: Prioritizing WAV format for recording.");
-        } else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-            preferredMimeType = 'audio/webm;codecs=opus';
-            console.log("VAD Init: WAV not supported, trying webm/opus.");
-        } else if (MediaRecorder.isTypeSupported('audio/mp4')) { // Safari spesso usa questo (AAC in MP4)
-            preferredMimeType = 'audio/mp4';
-            console.log("VAD Init: WAV & webm/opus not supported, trying mp4.");
-        } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
-            preferredMimeType = 'audio/ogg;codecs=opus';
-            console.log("VAD Init: WAV, webm/opus, mp4 not supported, trying ogg/opus.");
-        } else if (MediaRecorder.isTypeSupported('audio/m4a')) { // Alternativa per Safari/Apple
-             preferredMimeType = 'audio/m4a';
-             console.log("VAD Init: Previous preferred not supported, trying m4a.");
-        } else if (MediaRecorder.isTypeSupported('audio/aac')) { // Raramente supportato come contenitore, ma proviamo
-            preferredMimeType = 'audio/aac';
-            console.log("VAD Init: Previous preferred not supported, trying aac.");
-        }
-        else {
-            preferredMimeType = ''; // Lascia che il browser scelga
-            console.warn("VAD Init: Nessun formato MIME preferito (wav, webm, mp4, ogg, m4a, aac) supportato. Usando default browser.");
-        }
+        if (MediaRecorder.isTypeSupported('audio/wav')) preferredMimeType = 'audio/wav';
+        else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) preferredMimeType = 'audio/webm;codecs=opus';
+        else if (MediaRecorder.isTypeSupported('audio/mp4')) preferredMimeType = 'audio/mp4';
+        else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) preferredMimeType = 'audio/ogg;codecs=opus';
+        else if (MediaRecorder.isTypeSupported('audio/m4a')) preferredMimeType = 'audio/m4a';
+        else if (MediaRecorder.isTypeSupported('audio/aac')) preferredMimeType = 'audio/aac';
+        else console.warn("Nessun formato MIME preferito supportato. Usando default browser.");
         
-        recordingMimeType = preferredMimeType;
-        const initialExtension = getExtensionFromMimeType(recordingMimeType);
-        console.log("VAD Init: Preferred MIME Type to request:", recordingMimeType || "Browser Default", "| Initial Filename based on preference:", `${baseRecordingFilename}${initialExtension}`);
+        recordingMimeType = preferredMimeType; // Imposta il MIME type globale
+        console.log("VAD Init: Preferred MIME Type to request:", recordingMimeType || "Browser Default");
         return true;
-
     } catch (err) {
         console.error('Errore getUserMedia o AudioContext:', err);
         let msg = 'Errore microfono.';
@@ -124,48 +102,71 @@ async function initializeAudioProcessing() {
     }
 }
 
+// Funzione helper per fermare e rilasciare solo MediaRecorder
+function stopAndReleaseMediaRecorder() {
+    if (mediaRecorderForVAD) {
+        if (mediaRecorderForVAD.state === "recording") {
+            try {
+                mediaRecorderForVAD.stop();
+                console.log("MediaRecorder fermato prima della potenziale ricreazione.");
+            } catch (e) {
+                console.warn("Errore durante mediaRecorderForVAD.stop() in stopAndReleaseMediaRecorder:", e.message);
+            }
+        }
+        mediaRecorderForVAD.ondataavailable = null;
+        mediaRecorderForVAD.onstart = null;
+        mediaRecorderForVAD.onstop = null;
+        mediaRecorderForVAD.onerror = null;
+        mediaRecorderForVAD = null;
+        console.log("Riferimento a MediaRecorder precedente rimosso (impostato a null).");
+    }
+}
+
 function startVAD() {
-    if (!audioContext || !analyser || !globalStream) {
-        console.error("AudioContext non inizializzato per VAD.");
-        stopVAD();
+    if (!audioContext || !analyser || !globalStream || !microphoneSource) {
+        console.error("AudioContext/analyser/globalStream/microphoneSource non inizializzato per VAD.");
+        cleanUpFullSession(); // Se manca qualcosa di essenziale, pulisci tutto
         updateUI('idle', 'Errore Avvio', 'icon-mic', 'Errore avvio VAD. Ricarica.');
         return;
     }
-    updateUI('listening_continuous', 'Termina Conversazione', 'icon-stop', 'Ascolto...'); // icon-stop-session non esiste
+    // Se esiste un MediaRecorder, fermalo e rilascialo prima di crearne uno nuovo
+    stopAndReleaseMediaRecorder();
+
+    updateUI('listening_continuous', 'Termina Conversazione', 'icon-stop', 'Ascolto...');
     speaking = false;
     silenceStartTime = performance.now();
     currentTurnAudioChunks = [];
 
+    // Usa il recordingMimeType globale, che è stato determinato in initializeAudioProcessing
+    // e potenzialmente affinato dal primo avvio di MediaRecorder.
     const options = recordingMimeType ? { mimeType: recordingMimeType } : {};
     try {
         mediaRecorderForVAD = new MediaRecorder(globalStream, options);
-        console.log("MediaRecorder for VAD created. Requested MIME type:", options.mimeType || "Browser Default");
+        console.log("Nuovo MediaRecorder creato. Requested MIME type:", options.mimeType || "Browser Default");
 
+        // Questa logica aggiorna `recordingMimeType` se il browser ne sceglie uno diverso da quello richiesto.
+        // È importante che `recordingMimeType` sia stabile e rifletta ciò che il browser usa effettivamente.
         if (mediaRecorderForVAD.mimeType) {
-            if (recordingMimeType && mediaRecorderForVAD.mimeType !== recordingMimeType) {
-                 console.warn(`MediaRecorder userà ${mediaRecorderForVAD.mimeType} invece del richiesto ${recordingMimeType}. Aggiornamento del MIME type di riferimento.`);
+            if (recordingMimeType && mediaRecorderForVAD.mimeType !== recordingMimeType && recordingMimeType !== '') {
+                 console.warn(`MediaRecorder userà ${mediaRecorderForVAD.mimeType} invece del richiesto ${recordingMimeType}.`);
             }
-            recordingMimeType = mediaRecorderForVAD.mimeType; 
+            // Aggiorna recordingMimeType globale se è diverso da quello che MediaRecorder sta effettivamente usando.
+            // Questo è particolarmente importante la prima volta che MediaRecorder parte.
+            if (mediaRecorderForVAD.mimeType !== recordingMimeType) {
+                console.log(`Aggiornamento del recordingMimeType globale da "${recordingMimeType}" a quello effettivo del MediaRecorder: "${mediaRecorderForVAD.mimeType}"`);
+                recordingMimeType = mediaRecorderForVAD.mimeType;
+            }
         } else if (recordingMimeType) {
             console.warn(`MediaRecorder non ha riportato un mimeType effettivo, mantenendo il richiesto: ${recordingMimeType}`);
         } else {
-            console.error("Critico: MediaRecorder non ha un mimeType effettivo e non ne è stato richiesto uno. Registrazione potrebbe fallire o produrre formato sconosciuto.");
-            // Potrebbe essere saggio fermare qui o usare un fallback molto generico
-            // Se recordingMimeType è vuoto (browser default), MediaRecorder.mimeType dovrebbe essere popolato.
-            // Se ANCHE MediaRecorder.mimeType è vuoto, è un problema serio.
-            if (!mediaRecorderForVAD.mimeType) { // Se è ancora vuoto dopo la creazione
-                console.warn("MediaRecorder.mimeType è vuoto dopo la creazione. Il browser potrebbe non supportare la registrazione audio come configurata.");
-                // Non è possibile derivare un'estensione affidabile. Si potrebbe tentare con un'estensione generica.
-                // Ma è meglio fermare qui se il formato è completamente sconosciuto.
-            }
+            console.error("Critico: MediaRecorder non ha un mimeType effettivo e non ne è stato richiesto/determinato uno. La registrazione potrebbe fallire.");
         }
-        console.log("Effective MIME type from MediaRecorder:", mediaRecorderForVAD.mimeType);
-
+        console.log("Effective MIME type per questo MediaRecorder:", mediaRecorderForVAD.mimeType, "| Globale recordingMimeType:", recordingMimeType);
 
     } catch (e) {
         console.error("Errore creazione MediaRecorder:", e, "Opzioni:", options);
-        stopVAD();
-        updateUI('idle', 'Errore Registratore', 'icon-mic', 'Formato audio non supportato dal browser o errore MediaRecorder.');
+        cleanUpFullSession();
+        updateUI('idle', 'Errore Registratore', 'icon-mic', 'Formato audio non supportato o errore MediaRecorder.');
         return;
     }
 
@@ -175,47 +176,27 @@ function startVAD() {
         }
     };
     mediaRecorderForVAD.onstart = () => {
-        console.log("MediaRecorder for VAD started. Effective MIME type:", mediaRecorderForVAD.mimeType);
-         // Assicura che recordingMimeType sia aggiornato con quello effettivo, ANCHE qui.
+        console.log("MediaRecorder.onstart. Effective MIME type:", mediaRecorderForVAD.mimeType);
+        // Conferma finale che recordingMimeType globale è allineato.
         if (mediaRecorderForVAD.mimeType && mediaRecorderForVAD.mimeType !== recordingMimeType) {
-            console.log(`Aggiornamento di recordingMimeType a quello effettivo all'onstart: ${mediaRecorderForVAD.mimeType}`);
+            console.log(`Aggiornamento (onstart) del recordingMimeType globale a: "${mediaRecorderForVAD.mimeType}"`);
             recordingMimeType = mediaRecorderForVAD.mimeType;
         }
     };
     mediaRecorderForVAD.onstop = () => {
-        console.log("MediaRecorder for VAD stopped. Chunks:", currentTurnAudioChunks.length);
+        console.log("MediaRecorder.onstop. Chunks raccolti:", currentTurnAudioChunks.length);
     };
     mediaRecorderForVAD.onerror = (event) => {
         console.error("MediaRecorder error:", event.error);
-        stopVAD();
-        updateUI('idle', 'Errore Registrazione', 'icon-mic', 'Problema con la registrazione audio.');
+        // Non chiamare cleanUpFullSession qui direttamente, potrebbe essere troppo drastico
+        // L'errore potrebbe essere gestito in modo più granulare.
+        // Per ora, aggiorniamo l'UI e lasciamo che l'utente decida.
+        updateUI('idle', 'Errore Registrazione', 'icon-mic', 'Problema con la registrazione audio. Riprova.');
+        stopAndReleaseMediaRecorder(); // Rilascia il recorder problematico
     };
-    mediaRecorderForVAD.start(500); // Raccogli chunk ogni 500ms
+    mediaRecorderForVAD.start(500);
+    if (vadProcessTimeout) cancelAnimationFrame(vadProcessTimeout); // Assicura un solo loop
     processAudioLoop();
-}
-
-function stopVAD() {
-    console.log("Tentativo di fermare VAD...");
-    if (vadProcessTimeout) {
-        cancelAnimationFrame(vadProcessTimeout);
-        vadProcessTimeout = null;
-    }
-    if (mediaRecorderForVAD && mediaRecorderForVAD.state === "recording") {
-        try {
-            mediaRecorderForVAD.stop();
-        } catch (e) {
-            console.warn("Errore durante mediaRecorderForVAD.stop():", e.message);
-        }
-    }
-    mediaRecorderForVAD = null; // Rimuovi riferimento
-    // Non disconnettere microphoneSource qui se vuoi riavviare VAD senza reinizializzare tutto
-    // Ma se stopVAD è inteso come "fine sessione parziale", allora va bene.
-    // cleanUpFullSession si occupa della disconnessione completa.
-    currentTurnAudioChunks = [];
-    speaking = false;
-    // Non aggiornare UI a 'idle' qui, altrimenti interrompe il flusso di "resumeListeningAfterFernanda"
-    // L'UI viene gestita da chi chiama stopVAD o da cleanUpFullSession
-    console.log("VAD parzialmente fermato (MediaRecorder).");
 }
 
 function cleanUpFullSession() {
@@ -224,22 +205,15 @@ function cleanUpFullSession() {
         cancelAnimationFrame(vadProcessTimeout);
         vadProcessTimeout = null;
     }
-    if (mediaRecorderForVAD && mediaRecorderForVAD.state === "recording") {
-        try {
-            mediaRecorderForVAD.stop();
-        } catch (e) {
-            console.warn("Errore durante mediaRecorderForVAD.stop() in cleanUp:", e.message);
-        }
-    }
-    mediaRecorderForVAD = null;
+    stopAndReleaseMediaRecorder(); // Ferma e nullifica mediaRecorderForVAD
     
     if (microphoneSource) {
-        microphoneSource.disconnect();
+        microphoneSource.disconnect(); // Disconnetti da analyser
         microphoneSource = null;
     }
-    if (analyser) {
-        analyser = null; // Non ha un metodo disconnect, ma rimuovi riferimento
-    }
+    // Analyser non ha un metodo disconnect esplicito, ma non sarà più alimentato
+    analyser = null; 
+
     if (audioContext && audioContext.state !== 'closed') {
         audioContext.close().catch(e => console.warn("Errore chiusura AudioContext:", e));
         audioContext = null;
@@ -251,13 +225,15 @@ function cleanUpFullSession() {
     conversationHistory = [];
     currentTurnAudioChunks = [];
     speaking = false;
+    // recordingMimeType non viene resettato qui, perché è determinato da initializeAudioProcessing
+    // e potrebbe essere riutilizzato se l'utente inizia una nuova conversazione senza ricaricare la pagina.
     updateUI('idle', 'Avvia Conversazione', 'icon-mic', 'Pronta quando vuoi.');
     console.log("Sessione VAD completamente pulita.");
 }
 
 function processAudioLoop() {
-    if (currentConversationState !== 'listening_continuous' || !analyser) {
-        console.log("processAudioLoop: non in ascolto o analyser non pronto, esco.");
+    if (currentConversationState !== 'listening_continuous' || !analyser || !mediaRecorderForVAD) {
+        // console.log("processAudioLoop: non in ascolto, analyser non pronto, o mediaRecorder non esiste. Esco.");
         return;
     }
 
@@ -274,44 +250,47 @@ function processAudioLoop() {
         if (!speaking) {
             speaking = true;
             speechStartTime = currentTime;
-            console.log("VAD: Inizio parlato (RMS:", rms.toFixed(3), ")");
         }
-        silenceStartTime = currentTime; // Resetta timer silenzio mentre si parla
-    } else { // Silenzio rilevato (RMS <= soglia)
-        if (speaking) { // Se prima stava parlando
+        silenceStartTime = currentTime;
+    } else {
+        if (speaking) {
             if (currentTime - silenceStartTime > VAD_SILENCE_DURATION_MS) {
-                console.log("VAD: Fine parlato (RMS:", rms.toFixed(3), ", Silenzio per", (currentTime - silenceStartTime).toFixed(0), "ms)");
                 speaking = false;
                 const speechDuration = currentTime - speechStartTime - VAD_SILENCE_DURATION_MS;
 
                 if (speechDuration > VAD_SPEECH_MIN_DURATION_MS && currentTurnAudioChunks.length > 0) {
-                    console.log("VAD: Invio audio. Durata:", speechDuration.toFixed(0), "ms. Chunks:", currentTurnAudioChunks.length);
-                    
                     const chunksToSend = [...currentTurnAudioChunks];
-                    currentTurnAudioChunks = []; // Resetta per il prossimo turno
+                    currentTurnAudioChunks = [];
 
-                    // Assicurati che recordingMimeType sia quello effettivo o un fallback
-                    const actualBlobMimeType = mediaRecorderForVAD?.mimeType || recordingMimeType || 'application/octet-stream';
+                    // Usa il recordingMimeType globale, che dovrebbe essere affidabile.
+                    // Se mediaRecorderForVAD.mimeType è disponibile e diverso, potrebbe indicare un problema,
+                    // ma per la creazione del blob, affidiamoci a recordingMimeType che è stato verificato.
+                    const actualBlobMimeType = recordingMimeType || mediaRecorderForVAD?.mimeType || 'application/octet-stream';
                     
                     const audioBlob = new Blob(chunksToSend, { type: actualBlobMimeType });
-                    const fileExtension = getExtensionFromMimeType(actualBlobMimeType); // Usa il MIME type del blob
+                    const fileExtension = getExtensionFromMimeType(actualBlobMimeType);
                     const filenameForApi = `${baseRecordingFilename}${fileExtension}`;
 
-                    console.log(`VAD: Preparazione invio. Blob type: ${audioBlob.type} (effettivo: ${actualBlobMimeType}), Size: ${audioBlob.size}, Filename per API: ${filenameForApi}`);
+                    console.log('[DEBUG] ProcessAudioLoop - Invio audio:', {
+                        blobSize: audioBlob.size,
+                        blobType: audioBlob.type, // Tipo specificato nel Blob
+                        derivedFromMimeType: actualBlobMimeType, // MIME type usato per derivare tipo ed estensione
+                        mediaRecorderInstanceMimeType: mediaRecorderForVAD?.mimeType, // MIME type dell'istanza corrente del recorder
+                        globalReferenceMimeType: recordingMimeType, // MIME type di riferimento globale
+                        fileExtension: fileExtension,
+                        filenameForApi: filenameForApi,
+                        chunksLength: chunksToSend.length
+                    });
                     
-                    // Non fermare MediaRecorder qui, lo faremo dopo la risposta di Fernanda
-                    // o se l'utente clicca "Termina Conversazione"
                     sendAudioForTranscription(audioBlob, filenameForApi); 
-                    return; // Esce dal loop, attende la trascrizione/risposta
+                    return; 
                 } else {
                     console.log("VAD: Parlato troppo breve o nessun chunk. Durata:", speechDuration.toFixed(0), "ms. Chunks:", currentTurnAudioChunks.length);
-                    currentTurnAudioChunks = []; // Scarta i chunk
-                    // Continua ad ascoltare
+                    currentTurnAudioChunks = [];
                 }
             }
-            // else: ancora nel periodo di tolleranza del silenzio, continua a considerarlo "parlato"
-        } else { // Se era già in silenzio
-            silenceStartTime = currentTime; // Continua a registrare il tempo di inizio del silenzio corrente
+        } else {
+            silenceStartTime = currentTime;
         }
     }
     vadProcessTimeout = requestAnimationFrame(processAudioLoop);
@@ -320,7 +299,7 @@ function processAudioLoop() {
 async function sendAudioForTranscription(audioBlob, filename) {
     if (audioBlob.size === 0) {
         console.warn("Blob audio vuoto, non invio.");
-        resumeListeningAfterFernanda(); // Torna ad ascoltare
+        resumeListeningAfterFernanda();
         return;
     }
 
@@ -335,7 +314,6 @@ async function sendAudioForTranscription(audioBlob, filename) {
         });
 
         if (!transcribeResponse.ok) {
-            // Prova a leggere il JSON, altrimenti usa il testo di stato
             let errorPayload;
             try {
                 errorPayload = await transcribeResponse.json();
@@ -357,23 +335,18 @@ async function sendAudioForTranscription(audioBlob, filename) {
         await processChatWithFernanda(transcript);
 
     } catch (error) {
-        // MODIFICA: Gestione dell'errore per una visualizzazione migliore
         let displayErrorMessage = "Errore trascrizione.";
         const rawErrorMessage = error && error.message ? error.message : "Errore sconosciuto";
-
-        // Se il messaggio è già ben formattato dalla nostra API (es. inizia con [OpenAI Code...])
-        if (rawErrorMessage.startsWith("[OpenAI Code:")) {
-            displayErrorMessage = rawErrorMessage;
+        
+        if (rawErrorMessage.toLowerCase().includes("invalid file format") || rawErrorMessage.includes("[OpenAI Code:")) {
+            displayErrorMessage = rawErrorMessage; // Usa direttamente l'errore dettagliato dall'API
         } else {
-            // Altrimenti, prova a vedere se è un JSON (improbabile qui dopo il throw new Error)
-            // o semplicemente usa il messaggio così com'è.
-            // La causa dell'errore originale è già stata trasformata in stringa.
-            displayErrorMessage = rawErrorMessage;
+            displayErrorMessage = rawErrorMessage; // O il messaggio generico
         }
         
-        console.error('Errore trascrizione (VAD):', displayErrorMessage, error); // Logga anche l'oggetto errore originale
-        statusMessage.textContent = `Errore: ${displayErrorMessage}. Riprova parlando.`;
-        setTimeout(resumeListeningAfterFernanda, 2500); // Più tempo per leggere l'errore
+        console.error('Errore trascrizione (VAD):', displayErrorMessage, error);
+        statusMessage.textContent = `Errore: ${displayErrorMessage}. Riprova parlando.`; // "Errore:" qui
+        setTimeout(resumeListeningAfterFernanda, 2500);
     }
 }
 
@@ -394,9 +367,9 @@ async function processChatWithFernanda(transcript) {
         console.log("Fernanda's text reply (VAD):", assistantReply);
         
         conversationHistory.push({ role: 'assistant', content: assistantReply });
-        const MAX_HISTORY_LENGTH = 20; // Numero di turni (utente + assistente)
-        if (conversationHistory.length > MAX_HISTORY_LENGTH * 2) { // Ogni turno ha 2 messaggi
-            conversationHistory = conversationHistory.slice(conversationHistory.length - (MAX_HISTORY_LENGTH * 2));
+        const MAX_HISTORY_TURNS = 10; // 10 turni (utente + assistente = 20 messaggi)
+        if (conversationHistory.length > MAX_HISTORY_TURNS * 2) {
+            conversationHistory = conversationHistory.slice(conversationHistory.length - (MAX_HISTORY_TURNS * 2));
         }
 
         const ttsResponse = await fetch('/api/tts', {
@@ -414,7 +387,7 @@ async function processChatWithFernanda(transcript) {
 
     } catch (error) {
         console.error('Errore nel flusso chat/tts (VAD):', error);
-        statusMessage.textContent = `Oops: ${error.message}. Riprova parlando.`;
+        statusMessage.textContent = `Oops: ${error.message}. Riprova parlando.`; // "Oops:" qui
         setTimeout(resumeListeningAfterFernanda, 1500);
     }
 }
@@ -437,7 +410,7 @@ function playFernandaAudio(audioUrl) {
             URL.revokeObjectURL(currentAudio.src);
         }
         currentAudio = null;
-        if (currentConversationState === 'fernanda_speaking_continuous') { // Solo se non interrotta o terminata
+        if (currentConversationState === 'fernanda_speaking_continuous') {
             resumeListeningAfterFernanda();
         }
     };
@@ -455,15 +428,11 @@ function playFernandaAudio(audioUrl) {
     };
     currentAudio.play().catch(error => {
         console.error("Autoplay bloccato o errore play (VAD):", error);
-        // Questo blocco catch è per l'errore .play() stesso
-        isFernandaSpeaking = false; // Assicura che lo stato sia corretto
+        isFernandaSpeaking = false; 
         if (currentAudio && currentAudio.src && currentAudio.src.startsWith('blob:')) {
-            URL.revokeObjectURL(currentAudio.src); // Pulisci URL se il play fallisce
+            URL.revokeObjectURL(currentAudio.src); 
         }
         currentAudio = null;
-        
-        // Controlla se eravamo ancora nello stato di Fernanda che parla.
-        // Se sì, l'utente non ha interrotto e c'è stato un problema di autoplay.
         if (currentConversationState === 'fernanda_speaking_continuous') {
             statusMessage.textContent = 'Audio bloccato. Riprova parlando.';
             setTimeout(resumeListeningAfterFernanda, 1000);
@@ -472,77 +441,59 @@ function playFernandaAudio(audioUrl) {
 }
 
 function resumeListeningAfterFernanda() {
-    // Verifica se la sessione è ancora attiva (non 'idle' o terminata dall'utente)
+    console.log("resumeListeningAfterFernanda chiamato. Stato corrente:", currentConversationState);
     if (currentConversationState !== 'idle' && globalStream) {
-        updateUI('listening_continuous', 'Termina Conversazione', 'icon-stop', 'Tocca a te...'); // Usa icon-stop che esiste
+        // Non cambiare UI qui, startVAD lo farà
         
-        // Riattiva MediaRecorder se non è già attivo e se esiste
-        if (mediaRecorderForVAD && mediaRecorderForVAD.state === "inactive") {
-            currentTurnAudioChunks = []; // Pulisci i vecchi chunk
-            try {
-                mediaRecorderForVAD.start(500);
-                console.log("MediaRecorder riavviato per il nuovo turno.");
-            } catch (e) {
-                console.error("Errore nel riavviare MediaRecorder:", e);
-                cleanUpFullSession(); // Errore critico, pulisci tutto
-                updateUI('idle', 'Errore Registratore', 'icon-mic', 'Problema a riavviare registrazione.');
-                return;
-            }
-        } else if (!mediaRecorderForVAD) {
-            // Questo non dovrebbe succedere se la sessione è continua.
-            // Potrebbe indicare che startVAD non è stato completato o cleanUp è stato chiamato in modo imprevisto.
-            console.warn("resumeListeningAfterFernanda: mediaRecorderForVAD non esiste. Tentativo di reinizializzazione leggera.");
-            // Non chiamare initializeAudioProcessing() completo, ma prova a ricreare MediaRecorder
-            // Se globalStream esiste ancora, possiamo provare a riavviare solo MediaRecorder
-            if (globalStream) {
-                startVAD(); // Questo potrebbe essere troppo pesante, ma tenta di recuperare
-            } else {
-                cleanUpFullSession(); // Se globalStream non c'è, la sessione è corrotta
-                return;
-            }
+        // La logica ora è: sempre fermare/rilasciare il vecchio e chiamare startVAD per crearne uno nuovo.
+        // stopAndReleaseMediaRecorder(); // Già chiamato da startVAD ora, o lo farà se necessario
+        
+        if (globalStream && audioContext && analyser && microphoneSource) {
+            console.log("Pronto per chiamare startVAD da resumeListeningAfterFernanda.");
+            startVAD(); // Questo ora si occupa di fermare il vecchio recorder se esiste e crearne uno nuovo
+        } else {
+            console.error("Dipendenze mancanti per startVAD in resumeListening. Effettuo pulizia completa.");
+            cleanUpFullSession(); 
+            return;
         }
-        // Riattiva il loop di processamento audio
-        if (!vadProcessTimeout) { // Evita di duplicare requestAnimationFrame
-            processAudioLoop();
-        }
+        // Il processAudioLoop viene avviato da startVAD
     } else {
         console.log("resumeListeningAfterFernanda: la sessione non è attiva o è stata terminata. Non si riprende l'ascolto.");
-        if (!globalStream) { // Se globalStream è null, la sessione è stata terminata
-             updateUI('idle', 'Avvia Conversazione', 'icon-mic', 'Pronta quando vuoi.');
+        if (!globalStream && currentConversationState !== 'idle') { 
+             // Se globalStream è andato perso ma non siamo idle, è un errore, pulisci.
+             cleanUpFullSession();
+        } else if (!globalStream) {
+            // Se globalStream è null e siamo idle, l'UI dovrebbe già essere corretta.
+            updateUI('idle', 'Avvia Conversazione', 'icon-mic', 'Pronta quando vuoi.');
         }
     }
 }
-
 
 async function handleControlButtonClick() {
     if (currentConversationState === 'idle') {
         const ready = await initializeAudioProcessing();
         if (ready) {
-            startVAD();
+            startVAD(); // startVAD ora si occupa anche di chiamare processAudioLoop
         }
     } else if (currentConversationState === 'listening_continuous' || 
                currentConversationState === 'processing_vad_chunk') {
-        // L'utente vuole terminare l'intera conversazione
         cleanUpFullSession();
     } else if (currentConversationState === 'fernanda_speaking_continuous') {
-        // L'utente vuole interrompere Fernanda e parlare
         if (currentAudio) {
             currentAudio.pause();
-            currentAudio.currentTime = 0; // Opzionale: riavvolge l'audio
+            currentAudio.currentTime = 0; 
             if (currentAudio.src && currentAudio.src.startsWith('blob:')) {
                  URL.revokeObjectURL(currentAudio.src);
             }
             currentAudio = null;
         }
         isFernandaSpeaking = false;
-        // Non chiamare stopVAD() qui, perché vogliamo riprendere l'ascolto
-        resumeListeningAfterFernanda(); // Questo cambierà l'UI e riattiverà l'ascolto
+        resumeListeningAfterFernanda(); 
     }
 }
 
 controlButton.addEventListener('click', handleControlButtonClick);
 
-// Initial UI state
 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     updateUI('idle', 'Non Supportato', 'icon-mic', 'Audio/Mic non supportato.');
     controlButton.disabled = true;
