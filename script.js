@@ -34,13 +34,9 @@ function updateUI(state, buttonText, buttonIconClass, statusText) {
     controlButton.innerHTML = `<span class="${buttonIconClass}"></span>${buttonText}`;
     statusMessage.textContent = statusText || '';
     
-    // Il pulsante è disabilitato se si sta processando un chunk VAD,
-    // o se si è in una fase di transizione audio (es. avviamento, interruzione).
-    // Eccezione: se Fernanda sta parlando, il pulsante (ora "Interrompi Fernanda") deve essere abilitato
-    // a meno che non si sia in una transizione specifica (isTransitioningAudio).
     if (state === 'fernanda_speaking_continuous') {
         controlButton.innerHTML = `<span class="icon-stop"></span>Interrompi Fernanda`;
-        controlButton.disabled = isTransitioningAudio; // Disabilitato solo se c'è una transizione in corso
+        controlButton.disabled = isTransitioningAudio;
     } else {
         controlButton.disabled = (state === 'processing_vad_chunk' || isTransitioningAudio);
     }
@@ -57,8 +53,8 @@ function getExtensionFromMimeType(mimeType) {
     const typeSpecific = mimeType.split(';')[0].toLowerCase();
     let extension;
     switch (typeSpecific) {
+        case 'audio/wav': case 'audio/wave': extension = '.wav'; break; // Assicurati che WAV sia qui
         case 'audio/mpeg': extension = '.mp3'; break;
-        case 'audio/wav': case 'audio/wave': extension = '.wav'; break;
         case 'audio/webm': extension = '.webm'; break;
         case 'audio/opus': extension = '.opus'; break;
         case 'audio/mp4':
@@ -92,13 +88,13 @@ function getExtensionFromMimeType(mimeType) {
 
 async function initializeAudioProcessing() {
     console.log("Initializing audio processing...");
-    isTransitioningAudio = true; // Inizio transizione
+    isTransitioningAudio = true;
     updateUI('idle', 'Avvio...', 'icon-mic', 'Inizializzazione audio...');
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         updateUI('idle', 'Non Supportato', 'icon-mic', 'Audio/Mic non supportato.');
         controlButton.disabled = true;
-        isTransitioningAudio = false; // Fine transizione (fallita)
+        isTransitioningAudio = false;
         return false;
     }
     try {
@@ -125,15 +121,16 @@ async function initializeAudioProcessing() {
         console.log("Audio pipeline (mic -> analyser) setup complete.");
 
         let preferredMimeType = '';
+        // **MODIFICA CHIAVE: audio/wav è il PRIMO TENTATIVO ASSOLUTO**
         const mimeTypesToTest = [
-            'audio/wav',
-            'audio/mp4', // Spesso AAC in MP4 su mobile (iOS), che Whisper supporta come m4a
-            'audio/webm;codecs=opus',
-            'audio/mpeg', // Meno probabile che sia supportato per la registrazione da MediaRecorder
-            'audio/aac',
-            'audio/ogg;codecs=opus',
+            'audio/wav',                // Prova WAV per primo!
+            'audio/mp4',                // Poi MP4 (M4A)
+            'audio/webm;codecs=opus',   // Poi WebM Opus
+            'audio/ogg;codecs=opus',    // Poi OGG Opus
+            'audio/mpeg',               // MP3
+            'audio/aac',                // AAC
         ];
-        console.log("[initializeAudioProcessing] Testing MIME types (prioritized):", mimeTypesToTest);
+        console.log("[initializeAudioProcessing] Testing MIME types (PRIORITIZING WAV):", mimeTypesToTest);
 
         for (const mime of mimeTypesToTest) {
             if (MediaRecorder.isTypeSupported(mime)) {
@@ -153,15 +150,14 @@ async function initializeAudioProcessing() {
                 console.error("[initializeAudioProcessing] CRITICAL: MediaRecorder supports no common formats nor browser default.");
                 updateUI('idle', 'Errore Registratore', 'icon-mic', 'Formato audio non supportato.');
                 controlButton.disabled = true;
-                cleanUpFullSession(); // Pulisce e resetta isTransitioningAudio
-                return false; // Non può continuare
+                cleanUpFullSession();
+                return false;
             }
         } else {
             recordingMimeType = preferredMimeType;
         }
 
         console.log("[initializeAudioProcessing] Effective MIME Type for recording (initial):", recordingMimeType || "Browser Default");
-        // isTransitioningAudio sarà impostato a false da startVAD dopo l'avvio riuscito
         return true;
 
     } catch (err) {
@@ -171,8 +167,8 @@ async function initializeAudioProcessing() {
         else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') msg = 'Nessun microfono trovato.';
         else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') msg = 'Microfono in uso o non leggibile.';
         updateUI('idle', 'Errore Mic.', 'icon-mic', msg);
-        controlButton.disabled = true; // Mantiene il pulsante disabilitato se fallisce
-        isTransitioningAudio = false; // Fine transizione (fallita)
+        controlButton.disabled = true;
+        isTransitioningAudio = false;
         return false;
     }
 }
@@ -196,13 +192,13 @@ function stopAndReleaseMediaRecorder() {
 function startVAD() {
     if (!audioContext || !analyser || !globalStream || !microphoneSource) {
         console.error("startVAD: Critical audio components not initialized.");
-        cleanUpFullSession(); // Pulisce e resetta isTransitioningAudio
+        cleanUpFullSession();
         updateUI('idle', 'Errore Avvio VAD', 'icon-mic', 'Errore critico VAD. Ricarica.');
         return;
     }
 
-    stopAndReleaseMediaRecorder(); // Assicura che non ci siano recorder precedenti attivi
-    currentTurnAudioChunks = []; // Pulisci chunk per il nuovo turno
+    stopAndReleaseMediaRecorder();
+    currentTurnAudioChunks = [];
     speaking = false;
     silenceStartTime = performance.now();
 
@@ -213,12 +209,11 @@ function startVAD() {
         mediaRecorderForVAD = new MediaRecorder(globalStream, options);
         console.log("[startVAD] New MediaRecorder. Requested MIME:", options.mimeType || "Default", "Actual MediaRecorder.mimeType:", mediaRecorderForVAD.mimeType);
 
-        // Se MediaRecorder usa un MIME type diverso da quello richiesto, aggiorna la variabile globale
         if (mediaRecorderForVAD.mimeType && mediaRecorderForVAD.mimeType !== recordingMimeType) {
             console.warn(`[startVAD] MediaRecorder is using "${mediaRecorderForVAD.mimeType}", different from requested/global "${recordingMimeType}". Updating global recordingMimeType.`);
             recordingMimeType = mediaRecorderForVAD.mimeType;
         } else if (!mediaRecorderForVAD.mimeType && !recordingMimeType) {
-            console.error("[startVAD] CRITICAL: MediaRecorder has no effective MIME type, and no default was specified. Recording might produce unusable data for Whisper.");
+            console.error("[startVAD] CRITICAL: MediaRecorder has no effective MIME type, and no default was specified.");
         }
         console.log("[startVAD] Effective global recordingMimeType for this session:", recordingMimeType);
 
@@ -228,7 +223,7 @@ function startVAD() {
         if (e.name === 'SecurityError') errorMsg = 'Errore sicurezza MediaRecorder.';
         else if (e.name === 'NotSupportedError' || e.message.toLowerCase().includes('mime type')) errorMsg = `Formato audio (${recordingMimeType || 'default'}) non supportato.`;
         updateUI('idle', 'Errore Registratore', 'icon-mic', errorMsg);
-        cleanUpFullSession(); // Pulisce e resetta isTransitioningAudio
+        cleanUpFullSession();
         return;
     }
 
@@ -238,7 +233,6 @@ function startVAD() {
 
     mediaRecorderForVAD.onstart = () => {
         console.log("[MediaRecorder.onstart] Triggered. Effective MediaRecorder.mimeType:", mediaRecorderForVAD.mimeType);
-        // È qui che la transizione di avvio può considerarsi completata con successo.
         isTransitioningAudio = false;
         updateUI('listening_continuous', 'Termina Conversazione', 'icon-stop', 'Ascolto...');
     };
@@ -250,21 +244,17 @@ function startVAD() {
     mediaRecorderForVAD.onerror = (event) => {
         console.error("MediaRecorder error:", event.error ? event.error.name : "Unknown", event.error ? event.error.message : "No message", event);
         updateUI('idle', 'Errore Registrazione', 'icon-mic', 'Problema registrazione. Riprova.');
-        // Non chiamare cleanUpFullSession qui, potrebbe essere troppo drastico se l'utente vuole riprovare
-        // ma rilascia il recorder attuale
         stopAndReleaseMediaRecorder();
-        isTransitioningAudio = false; // Assicura che non rimanga bloccato
-        // Forse re-inizializzare l'UI a idle?
-        // cleanUpFullSession(); // Considera se questo è meglio per resettare completamente
+        isTransitioningAudio = false;
     };
 
     try {
-        mediaRecorderForVAD.start(500); // Raccogli dati ogni 500ms
+        mediaRecorderForVAD.start(500);
         console.log("[startVAD] MediaRecorder.start(500) called.");
     } catch (e) {
         console.error("Error MediaRecorder.start():", e.name, e.message, e);
         updateUI('idle', 'Errore Avvio Reg.', 'icon-mic', 'Impossibile avviare registrazione.');
-        cleanUpFullSession(); // Pulisce e resetta isTransitioningAudio
+        cleanUpFullSession();
         return;
     }
 
@@ -274,64 +264,53 @@ function startVAD() {
 
 function cleanUpFullSession() {
     console.log("Cleaning up full VAD session...");
-    isTransitioningAudio = true; // Inizia transizione di pulizia
+    isTransitioningAudio = true;
 
     if (vadProcessTimeout) {
         cancelAnimationFrame(vadProcessTimeout);
         vadProcessTimeout = null;
         console.log("VAD process loop cancelled.");
     }
-
     stopAndReleaseMediaRecorder();
-
     if (microphoneSource) {
         try { microphoneSource.disconnect(); console.log("Microphone source disconnected."); }
         catch (e) { console.warn("Error disconnecting microphone source:", e.message); }
         microphoneSource = null;
     }
     analyser = null;
-
     if (audioContext && audioContext.state !== 'closed') {
-        console.log("Closing AudioContext. State:", audioContext.state);
         audioContext.close().then(() => {
             console.log("AudioContext closed.");
             audioContext = null;
         }).catch(e => {
             console.warn("Error closing AudioContext:", e.message, e);
-            audioContext = null; // Assicura che sia null anche in caso di errore
+            audioContext = null;
         });
-    } else if (audioContext) { // Se è closed o null
+    } else if (audioContext) {
         audioContext = null;
     }
-
     if (globalStream) {
-        globalStream.getTracks().forEach(track => {
-            track.stop();
-            console.log(`Track ${track.kind} (id: ${track.id}) stopped.`);
-        });
+        globalStream.getTracks().forEach(track => track.stop());
         globalStream = null;
         console.log("Global media stream released.");
     }
-
     conversationHistory = [];
     currentTurnAudioChunks = [];
     speaking = false;
     isFernandaSpeaking = false;
     if(currentAudio) {
         currentAudio.pause();
-        if (currentAudio.src && currentAudio.src.startsWith('blob:')) URL.revokeObjectURL(currentAudio.src);
+        if (currentAudio.src?.startsWith('blob:')) URL.revokeObjectURL(currentAudio.src);
         currentAudio = null;
     }
-
     updateUI('idle', 'Avvia Conversazione', 'icon-mic', 'Pronta quando vuoi.');
     console.log("Sessione VAD pulita, UI resettata a idle.");
-    isTransitioningAudio = false; // Fine transizione di pulizia
+    isTransitioningAudio = false;
 }
 
 function processAudioLoop() {
     if (currentConversationState !== 'listening_continuous' || !analyser || !mediaRecorderForVAD || mediaRecorderForVAD.state !== "recording" || isTransitioningAudio) {
         if (currentConversationState === 'listening_continuous' && !isTransitioningAudio && vadProcessTimeout) {
-            // Solo continua il loop se siamo in ascolto, non in transizione, e il loop è già stato avviato
              requestAnimationFrame(processAudioLoop);
         }
         return;
@@ -368,17 +347,16 @@ function processAudioLoop() {
                     }
                     
                     updateUI('processing_vad_chunk', 'Termina Conversazione', 'icon-thinking', 'Trascrivo audio...');
-                    isTransitioningAudio = true; // Inizio transizione per invio/processamento
+                    isTransitioningAudio = true;
 
                     let actualMimeTypeForBlob = recordingMimeType || mediaRecorderForVAD?.mimeType || 'application/octet-stream';
                     const determinedFileExtension = getExtensionFromMimeType(actualMimeTypeForBlob);
                     
-                    // Logica di allineamento MIME/Estensione (semplificata per chiarezza)
                     if (determinedFileExtension === '.m4a' && !actualMimeTypeForBlob.startsWith('audio/mp4') && !actualMimeTypeForBlob.startsWith('audio/m4a')) {
                         actualMimeTypeForBlob = 'audio/mp4';
                     } else if (determinedFileExtension === '.wav' && !actualMimeTypeForBlob.startsWith('audio/wav')) {
-                        actualMimeTypeForBlob = 'audio/wav';
-                    } // Aggiungere altri casi se necessario
+                        actualMimeTypeForBlob = 'audio/wav'; // Assicura che se l'estensione è .wav, il tipo sia audio/wav
+                    }
 
                     const filenameForApi = `${baseRecordingFilename}${determinedFileExtension}`;
 
@@ -390,13 +368,12 @@ function processAudioLoop() {
                     if (audioBlob.size === 0) {
                         console.warn("[processAudioLoop] Blob audio vuoto. Non invio.");
                         statusMessage.textContent = 'Audio non rilevato. Riascolto.';
-                        isTransitioningAudio = false; // Fine transizione (fallita)
+                        isTransitioningAudio = false;
                         if (currentConversationState !== 'idle') resumeListeningAfterFernanda();
                         return;
                     }
-
-                    sendAudioForTranscription(audioBlob, filenameForApi); // Questa funzione gestirà isTransitioningAudio al suo termine
-                    return; // Esce dal loop, sendAudio gestirà la continuazione
+                    sendAudioForTranscription(audioBlob, filenameForApi);
+                    return;
                 } else {
                     console.log(`VAD: Parlato breve (${speechDuration.toFixed(0)}ms) o no chunk (${currentTurnAudioChunks.length}).`);
                     currentTurnAudioChunks = [];
@@ -411,7 +388,6 @@ function processAudioLoop() {
 
 async function sendAudioForTranscription(audioBlob, filename) {
     console.log(`[sendAudioForTranscription] Invio. Filename='${filename}', Blob Type='${audioBlob.type}', Size=${audioBlob.size}`);
-    // isTransitioningAudio dovrebbe essere già true da processAudioLoop
 
     const formData = new FormData();
     formData.append('audio', audioBlob, filename);
@@ -429,12 +405,12 @@ async function sendAudioForTranscription(audioBlob, filename) {
         console.log("[sendAudioForTranscription] Whisper transcript:", transcript);
         if (!transcript || transcript.trim().length < 2) {
             statusMessage.textContent = 'Non ho colto bene. Ripeti?';
-            isTransitioningAudio = false; // Fine transizione
+            isTransitioningAudio = false;
             if (currentConversationState !== 'idle') resumeListeningAfterFernanda();
             return;
         }
         conversationHistory.push({ role: 'user', content: transcript });
-        await processChatWithFernanda(transcript); // Questa gestirà isTransitioningAudio
+        await processChatWithFernanda(transcript);
     } catch (error) {
         let displayErrorMessage = "Errore trascrizione.";
         const rawErrorMessage = error?.message || "Errore sconosciuto trascrizione";
@@ -447,13 +423,12 @@ async function sendAudioForTranscription(audioBlob, filename) {
             displayErrorMessage = rawErrorMessage;
         }
         statusMessage.textContent = `${displayErrorMessage}. Riprova.`;
-        isTransitioningAudio = false; // Fine transizione (fallita)
+        isTransitioningAudio = false;
         if (currentConversationState !== 'idle') resumeListeningAfterFernanda();
     }
 }
 
 async function processChatWithFernanda(transcript) {
-    // isTransitioningAudio è ancora true da sendAudioForTranscription o processAudioLoop
     updateUI('processing_vad_chunk', 'Termina Conversazione', 'icon-thinking', 'Fernanda pensa...');
     try {
         const chatResponse = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: transcript, history: conversationHistory }) });
@@ -470,7 +445,7 @@ async function processChatWithFernanda(transcript) {
             return;
         }
         conversationHistory.push({ role: 'assistant', content: assistantReply });
-        if (conversationHistory.length > 20) conversationHistory = conversationHistory.slice(-20); // Limita cronologia
+        if (conversationHistory.length > 20) conversationHistory = conversationHistory.slice(-20);
 
         updateUI('processing_vad_chunk', 'Termina Conversazione', 'icon-thinking', 'Fernanda prepara audio...');
         const ttsResponse = await fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: assistantReply }) });
@@ -482,17 +457,16 @@ async function processChatWithFernanda(transcript) {
         if (audioFernandaBlob.size === 0) throw new Error("Audio da Fernanda vuoto.");
         
         const audioUrl = URL.createObjectURL(audioFernandaBlob);
-        playFernandaAudio(audioUrl); // Questa gestirà isTransitioningAudio al termine/errore della riproduzione
+        playFernandaAudio(audioUrl);
     } catch (error) {
         console.error('Errore chat/tts:', error.message, error);
         statusMessage.textContent = `Oops, ${error.message}. Riprova.`;
-        isTransitioningAudio = false; // Fine transizione (fallita)
+        isTransitioningAudio = false;
         if (currentConversationState !== 'idle') resumeListeningAfterFernanda();
     }
 }
 
 function playFernandaAudio(audioUrl) {
-    // isTransitioningAudio è ancora true
     if (currentAudio) {
         currentAudio.pause();
         if (currentAudio.src?.startsWith('blob:')) URL.revokeObjectURL(currentAudio.src);
@@ -500,16 +474,14 @@ function playFernandaAudio(audioUrl) {
     currentAudio = new Audio(audioUrl);
     isFernandaSpeaking = true;
     updateUI('fernanda_speaking_continuous', 'Interrompi Fernanda', 'icon-stop', 'Fernanda parla...');
-    // isTransitioningAudio rimane true mentre Fernanda parla, per evitare che l'utente faccia cose strane.
-    // Verrà impostato a false da resumeListeningAfterFernanda o se l'utente interrompe.
 
     currentAudio.onended = () => {
         console.log("Fernanda finished speaking.");
         isFernandaSpeaking = false;
         if (currentAudio?.src.startsWith('blob:')) URL.revokeObjectURL(currentAudio.src);
         currentAudio = null;
-        if (currentConversationState === 'fernanda_speaking_continuous') { // Solo se non interrotto prima
-            isTransitioningAudio = false; // Ora la transizione è davvero finita
+        if (currentConversationState === 'fernanda_speaking_continuous') {
+            isTransitioningAudio = false;
             resumeListeningAfterFernanda();
         }
     };
@@ -522,7 +494,7 @@ function playFernandaAudio(audioUrl) {
         if (currentAudio?.error) errMsg += ` (Codice: ${currentAudio.error.code})`;
         statusMessage.textContent = `${errMsg} Riprova.`;
         if (currentConversationState === 'fernanda_speaking_continuous') {
-            isTransitioningAudio = false; // Fine transizione (fallita)
+            isTransitioningAudio = false;
             resumeListeningAfterFernanda();
         }
     };
@@ -533,7 +505,7 @@ function playFernandaAudio(audioUrl) {
         currentAudio = null;
         statusMessage.textContent = `Riproduzione audio Fernanda fallita. Riprova.`;
         if (currentConversationState === 'fernanda_speaking_continuous') {
-            isTransitioningAudio = false; // Fine transizione (fallita)
+            isTransitioningAudio = false;
             resumeListeningAfterFernanda();
         }
     });
@@ -543,40 +515,35 @@ function resumeListeningAfterFernanda() {
     console.log("resumeListeningAfterFernanda. Stato:", currentConversationState, "Stream:", !!globalStream, "isTransitioningAudio:", isTransitioningAudio);
     if (currentConversationState === 'idle' || !globalStream) {
         console.log("resumeListeningAfterFernanda: Sessione terminata o stream perso. Non riprendo.");
-        if (currentConversationState !== 'idle') cleanUpFullSession(); // Pulisce se lo stream è perso ma non siamo idle
-        isTransitioningAudio = false; // Assicura che sia false
+        if (currentConversationState !== 'idle') cleanUpFullSession();
+        isTransitioningAudio = false;
         return;
     }
-
-    // Se siamo già in una transizione (es. l'utente ha cliccato "interrompi" e siamo qui), non fare nulla
     if (isTransitioningAudio && currentConversationState !== 'fernanda_speaking_continuous') {
-        // 'fernanda_speaking_continuous' è un caso speciale perché isTransitioningAudio potrebbe essere
-        // ancora true dal ciclo precedente, ma vogliamo comunque riavviare.
         console.log("resumeListeningAfterFernanda: Già in transizione, non riavvio VAD.");
         return;
     }
 
-    isTransitioningAudio = true; // Inizio transizione per riavviare VAD
+    isTransitioningAudio = true;
     console.log("Impostato isTransitioningAudio = true per riprendere ascolto.");
     currentTurnAudioChunks = [];
     
-    // Breve ritardo per permettere all'eventuale audio precedente di "calmarsi"
     setTimeout(() => {
         if (!globalStream || !audioContext || audioContext.state === 'closed' || !analyser || !microphoneSource) {
             console.error("resumeListeningAfterFernanda: Dipendenze audio mancanti o chiuse. Pulizia.");
-            cleanUpFullSession(); // Resetta a idle e isTransitioningAudio a false
+            cleanUpFullSession();
             return;
         }
         if (audioContext.state === 'suspended') {
             audioContext.resume().then(() => {
                 console.log("AudioContext ripreso in resumeListening.");
-                startVAD(); // startVAD imposterà isTransitioningAudio a false
+                startVAD();
             }).catch(err => {
                 console.error("Fallimento ripresa AudioContext in resumeListening.", err);
                 cleanUpFullSession();
             });
         } else {
-            startVAD(); // startVAD imposterà isTransitioningAudio a false
+            startVAD();
         }
     }, 100);
 }
@@ -590,7 +557,6 @@ async function handleControlButtonClick() {
         return;
     }
 
-    // Sblocco audio per mobile alla prima interazione
     if (!window.audioPlaybackUnlockedViaInteraction) {
         let unlockAudio = new Audio("data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA");
         unlockAudio.volume = 0.001;
@@ -603,20 +569,18 @@ async function handleControlButtonClick() {
     }
 
     if (currentConversationState === 'idle') {
-        // isTransitioningAudio sarà gestito da initializeAudioProcessing e startVAD
         const ready = await initializeAudioProcessing();
         if (ready) {
             startVAD();
         }
-        // Se !ready, initializeAudioProcessing avrà già gestito l'UI e isTransitioningAudio
     } else if (currentConversationState === 'listening_continuous' || currentConversationState === 'processing_vad_chunk') {
         console.log("User requested stop session (from listening/processing).");
-        isTransitioningAudio = true; // Blocca
+        isTransitioningAudio = true;
         updateUI(currentConversationState, 'Stop...', controlButton.querySelector('span').className, 'Terminazione...');
-        cleanUpFullSession(); // Resetta a idle e isTransitioningAudio a false
+        cleanUpFullSession();
     } else if (currentConversationState === 'fernanda_speaking_continuous') {
         console.log("User requested interrupt Fernanda.");
-        isTransitioningAudio = true; // Blocca
+        isTransitioningAudio = true;
         updateUI('fernanda_speaking_continuous', 'Stop...', 'icon-stop', 'Interrompo Fernanda...');
         if (currentAudio) {
             currentAudio.pause();
@@ -624,8 +588,7 @@ async function handleControlButtonClick() {
             currentAudio = null;
         }
         isFernandaSpeaking = false;
-        // Non pulire tutta la sessione, riprendi solo ad ascoltare
-        resumeListeningAfterFernanda(); // resumeListeningAfterFernanda gestirà isTransitioningAudio
+        resumeListeningAfterFernanda();
     }
 }
 
