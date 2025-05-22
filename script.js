@@ -17,7 +17,7 @@ let vadProcessTimeout = null;
 
 let currentTurnAudioChunks = [];
 let mediaRecorderForVAD;
-let recordingMimeType = '';
+let recordingMimeType = ''; // Sarà determinato o aggiornato dinamicamente
 const baseRecordingFilename = 'user_vad_audio';
 
 // --- Cronologia Conversazione ---
@@ -53,10 +53,10 @@ function getExtensionFromMimeType(mimeType) {
         case 'audio/wav': case 'audio/wave': extension = '.wav'; break;
         case 'audio/webm': extension = '.webm'; break; // Spesso con codec=opus
         case 'audio/opus': extension = '.opus'; break;
-        case 'audio/mp4': 
+        case 'audio/mp4':
             // Per Safari (iOS), audio/mp4 è spesso AAC. .m4a è più specifico per audio.
             // OpenAI supporta .m4a e .mp4 per AAC. Preferiamo .m4a per chiarezza.
-            extension = '.m4a'; 
+            extension = '.m4a';
             console.log("[getExtensionFromMimeType] audio/mp4 rilevato, usando estensione .m4a");
             break;
         case 'audio/m4a': extension = '.m4a'; break;
@@ -64,7 +64,7 @@ function getExtensionFromMimeType(mimeType) {
         case 'audio/mpeg': extension = '.mp3'; break;
         case 'audio/aac': extension = '.aac'; break;
         default:
-            console.warn(`[getExtensionFromMimeType] Nessuna estensione nota per MIME: ${mimeType}. Tentativo fallback.`);
+            console.warn(`[getExtensionFromMimeType] Nessuna estensione nota per MIME: ${typeSpecific}. Tentativo fallback.`);
             if (typeSpecific.startsWith('audio/x-')) {
                 const potentialExt = typeSpecific.substring(8);
                 if (potentialExt.length > 0 && potentialExt.length <= 4) {
@@ -121,13 +121,14 @@ async function initializeAudioProcessing() {
         console.log("Audio pipeline (mic -> analyser) setup complete.");
 
         let preferredMimeType = '';
-        // **MODIFICA: Priorità a WAV, poi MP4 (per AAC su iOS), poi altri formati comuni supportati da Whisper**
         const mimeTypesToTest = [
-            'audio/wav',                // Massima compatibilità, anche se file più grandi
-            'audio/mp4',                // Su iOS è probabile AAC, Whisper lo supporta (come .mp4 o .m4a)
-            'audio/aac',                // Formato AAC diretto
-            'audio/webm;codecs=opus',   // Buona qualità/compressione, se supportato
-            'audio/ogg;codecs=opus',    // Simile a webm/opus
+            'audio/wav',
+            'audio/mp4', // Potrebbe essere AAC su iOS, Whisper lo supporta
+            'audio/m4a', // Specifica per audio AAC
+            'audio/aac',
+            'audio/webm;codecs=opus',
+            'audio/ogg;codecs=opus',
+            'audio/mpeg', // MP3
         ];
         console.log("[initializeAudioProcessing] Testando MIME types:", mimeTypesToTest);
 
@@ -142,9 +143,8 @@ async function initializeAudioProcessing() {
         }
         
         if (!preferredMimeType && MediaRecorder.isTypeSupported('')) {
-            // Se nessuno dei preferiti è supportato, ma il browser supporta MediaRecorder con un tipo di default
             console.warn("[initializeAudioProcessing] Nessun MIME type preferito esplicito supportato. Si userà il default del browser se disponibile (lasciando recordingMimeType vuoto).");
-            recordingMimeType = ''; // Lascia che sia il browser a decidere
+            recordingMimeType = ''; // Lascia che sia il browser a decidere, verrà catturato dopo
         } else if (!preferredMimeType) {
             console.error("[initializeAudioProcessing] CRITICAL: MediaRecorder non sembra supportare alcun formato audio comune né un default vuoto.");
             updateUI('idle', 'Errore Registratore', 'icon-mic', 'Formato audio non supportato per la registrazione.');
@@ -155,7 +155,7 @@ async function initializeAudioProcessing() {
             recordingMimeType = preferredMimeType;
         }
         
-        console.log("[initializeAudioProcessing] VAD Init: Preferred MIME Type to request (iniziale):", recordingMimeType || "Browser Default");
+        console.log("[initializeAudioProcessing] VAD Init: Initial recordingMimeType (potrebbe essere vuoto o un preferito):", recordingMimeType || "Browser Default");
         return true;
 
     } catch (err) {
@@ -203,25 +203,27 @@ function startVAD() {
     speaking = false;
     silenceStartTime = performance.now();
     currentTurnAudioChunks = [];
+    
+    // Usa recordingMimeType se specificato, altrimenti lascia vuoto per il default del browser
     const options = recordingMimeType ? { mimeType: recordingMimeType } : {};
-    console.log("[startVAD] Attempting MediaRecorder creation. Options:", options);
+    console.log("[startVAD] Attempting MediaRecorder creation. Requested options:", options);
+
     try {
         mediaRecorderForVAD = new MediaRecorder(globalStream, options);
-        console.log("[startVAD] New MediaRecorder. Requested MIME:", options.mimeType || "Default", "Actual MediaRecorder.mimeType:", mediaRecorderForVAD.mimeType);
+        console.log("[startVAD] New MediaRecorder created. Requested MIME:", options.mimeType || "Browser Default");
         
-        // Aggiorna recordingMimeType con quello effettivo, se fornito e diverso.
-        // Questo è importante perché il browser potrebbe scegliere un codec specifico (es. audio/webm;codecs=opus)
-        if (mediaRecorderForVAD.mimeType && mediaRecorderForVAD.mimeType !== recordingMimeType) {
-            console.warn(`[startVAD] MediaRecorder is using "${mediaRecorderForVAD.mimeType}", which differs from requested "${recordingMimeType}". Updating global recordingMimeType.`);
-            recordingMimeType = mediaRecorderForVAD.mimeType;
-        } else if (!mediaRecorderForVAD.mimeType && recordingMimeType) {
-            // Browser non ha riportato un mimeType effettivo, manteniamo quello richiesto se c'era
-            console.warn(`[startVAD] MediaRecorder did not report an effective MIME type. Sticking with globally set/requested: "${recordingMimeType}".`);
-        } else if (!mediaRecorderForVAD.mimeType && !recordingMimeType) {
-            // Situazione critica: nessun MIME type specificato o rilevato.
-            console.error("[startVAD] CRITICAL: MediaRecorder does not have an effective MIME type and no default was specified. Recording might fail or produce unusable data for Whisper.");
+        // Il MIME type effettivo usato da MediaRecorder è disponibile dopo la creazione.
+        // Aggiorniamo recordingMimeType con questo valore effettivo.
+        // Questo è cruciale perché il browser potrebbe aver scelto un codec specifico o un formato leggermente diverso.
+        if (mediaRecorderForVAD.mimeType) {
+            console.log(`[startVAD] MediaRecorder effective MIME type: "${mediaRecorderForVAD.mimeType}". Updating global recordingMimeType.`);
+            recordingMimeType = mediaRecorderForVAD.mimeType; // Salva il MIME type effettivo
+        } else {
+            // Se il browser non riporta un mimeType qui (raro, ma possibile),
+            // e non avevamo un preferito, ci affideremo al fallback in processAudioLoop.
+            console.warn("[startVAD] MediaRecorder did not report an effective MIME type after creation. Global recordingMimeType remains:", recordingMimeType || "Empty (will rely on fallback or hope for onstart update)");
         }
-        console.log("[startVAD] Effective global recordingMimeType for this session (after MediaRecorder creation):", recordingMimeType);
+        console.log("[startVAD] Effective global recordingMimeType for this session (after MediaRecorder creation):", recordingMimeType || "Not yet determined/browser default");
 
     } catch (e) {
         console.error("Error creating MediaRecorder:", e.name, e.message, e, "Options:", options);
@@ -229,31 +231,36 @@ function startVAD() {
         cleanUpFullSession();
         let errorMsg = 'Errore MediaRecorder.';
         if (e.name === 'SecurityError') errorMsg = 'Errore sicurezza MediaRecorder.';
-        if (e.name === 'NotSupportedError' || e.message.toLowerCase().includes('mime type')) errorMsg = 'Formato audio (MIME) non supportato.';
+        if (e.name === 'NotSupportedError' || (e.message && e.message.toLowerCase().includes('mime type'))) errorMsg = 'Formato audio (MIME) non supportato.';
         updateUI('idle', 'Errore Registratore', 'icon-mic', errorMsg);
         return;
     }
+
     mediaRecorderForVAD.ondataavailable = event => {
         if (event.data.size > 0 && !isTransitioningAudio) currentTurnAudioChunks.push(event.data);
     };
+
     mediaRecorderForVAD.onstart = () => {
         console.log("[MediaRecorder.onstart] Triggered. Effective MediaRecorder.mimeType:", mediaRecorderForVAD.mimeType);
-        // Ricontrolla e aggiorna il MIME type globale qui, è il momento più affidabile per quello effettivo usato.
+        // Qui è un altro buon posto per catturare il MIME type effettivo, se non già fatto.
         if (mediaRecorderForVAD.mimeType && mediaRecorderForVAD.mimeType !== recordingMimeType) {
             console.log(`[MediaRecorder.onstart] Updating global recordingMimeType from "${recordingMimeType}" to "${mediaRecorderForVAD.mimeType}"`);
             recordingMimeType = mediaRecorderForVAD.mimeType;
         }
         isTransitioningAudio = false;
     };
+
     mediaRecorderForVAD.onstop = () => {
         console.log("[MediaRecorder.onstop] Triggered. Chunks collected:", currentTurnAudioChunks.length, "Total size (approx):", currentTurnAudioChunks.reduce((s, b) => s + b.size, 0), "bytes");
     };
+
     mediaRecorderForVAD.onerror = (event) => {
         console.error("MediaRecorder error:", event.error ? event.error.name : "Unknown", event.error ? event.error.message : "No message", event.error);
         isTransitioningAudio = false;
         updateUI('idle', 'Errore Registrazione', 'icon-mic', 'Problema registrazione. Riprova.');
         stopAndReleaseMediaRecorder();
     };
+
     try {
         mediaRecorderForVAD.start(500); // Raccogli dati ogni 500ms
         console.log("[startVAD] MediaRecorder.start(500) called.");
@@ -264,6 +271,7 @@ function startVAD() {
         updateUI('idle', 'Errore Avvio Reg.', 'icon-mic', 'Impossibile avviare registrazione.');
         return;
     }
+
     if (vadProcessTimeout) cancelAnimationFrame(vadProcessTimeout);
     processAudioLoop();
 }
@@ -317,6 +325,9 @@ function cleanUpFullSession() {
         if (currentAudio.src && currentAudio.src.startsWith('blob:')) URL.revokeObjectURL(currentAudio.src);
         currentAudio = null;
     }
+    // NON resettare recordingMimeType qui, potrebbe essere utile per il prossimo avvio
+    // se l'utente clicca di nuovo "Avvia" senza ricaricare la pagina.
+    // Verrà comunque rideterminato in initializeAudioProcessing/startVAD.
     updateUI('idle', 'Avvia Conversazione', 'icon-mic', 'Pronta quando vuoi.');
     console.log("Sessione VAD pulita, UI resettata a idle.");
 }
@@ -353,13 +364,36 @@ function processAudioLoop() {
                         return;
                     }
 
-                    // **LOGGING CRUCIALE PER FORMATO AUDIO**
-                    const actualBlobMimeType = recordingMimeType || mediaRecorderForVAD?.mimeType || 'application/octet-stream';
-                    const fileExtension = getExtensionFromMimeType(actualBlobMimeType); // Usa la funzione aggiornata
-                    const filenameForApi = `${baseRecordingFilename}${fileExtension}`;
-                    console.log(`[processAudioLoop] Preparazione invio audio. Globale recordingMimeType: "${recordingMimeType}", MediaRecorder effettivo MIME: "${mediaRecorderForVAD?.mimeType}", Blob MIME type: "${actualBlobMimeType}", Estensione Calcolata: "${fileExtension}", Filename per API: "${filenameForApi}"`);
+                    // --- SEZIONE MODIFICATA PER GESTIONE MIME TYPE E ESTENSIONE ---
+                    let determinedMimeType = recordingMimeType || mediaRecorderForVAD?.mimeType;
+                    let finalMimeTypeForBlob;
+                    let finalFileExtension;
+
+                    // Controlla se determinedMimeType è nullo, vuoto, o 'application/octet-stream'
+                    // oppure se è un MIME type non specifico come 'audio/data' che alcuni browser potrebbero usare
+                    if (!determinedMimeType ||
+                        (typeof determinedMimeType === 'string' && determinedMimeType.trim() === '') ||
+                        determinedMimeType.trim() === 'application/octet-stream' ||
+                        determinedMimeType.trim() === 'audio/data') { // Aggiunto controllo per 'audio/data' o simili generici
+
+                        // Fallback intelligente per mobile (specialmente iOS/Safari)
+                        // iOS tende a registrare in AAC dentro un container MP4.
+                        // OpenAI accetta .m4a (preferito per solo audio AAC) o .mp4.
+                        // Anche Android potrebbe fornire audio/mp4 o audio/aac.
+                        finalMimeTypeForBlob = 'audio/mp4'; // Tipo MIME per il Blob, per coerenza
+                        finalFileExtension = '.m4a';       // Estensione per il filename inviato a OpenAI
+                        console.warn(`[processAudioLoop] MIME type non determinato, generico ('${determinedMimeType}'), o vuoto. Applicato fallback mobile/OpenAI: MIME per Blob='${finalMimeTypeForBlob}', Estensione File='${finalFileExtension}'.`);
+                    } else {
+                        finalMimeTypeForBlob = determinedMimeType;
+                        finalFileExtension = getExtensionFromMimeType(determinedMimeType); // Usa la tua funzione esistente
+                    }
                     
-                    const audioBlob = new Blob(chunksToSend, { type: actualBlobMimeType });
+                    const filenameForApi = `${baseRecordingFilename}${finalFileExtension}`;
+                    console.log(`[processAudioLoop] Preparazione invio audio. Globale recordingMimeType: "${recordingMimeType}", MediaRecorder effettivo MIME: "${mediaRecorderForVAD?.mimeType}", Determined initial MIME: "${determinedMimeType}", MIME type finale per Blob: "${finalMimeTypeForBlob}", Estensione file finale: "${finalFileExtension}", Filename per API: "${filenameForApi}"`);
+                    
+                    const audioBlob = new Blob(chunksToSend, { type: finalMimeTypeForBlob });
+                    // --- FINE SEZIONE MODIFICATA ---
+                    
                     console.log(`[processAudioLoop] Blob creato. Size: ${audioBlob.size}, Type: ${audioBlob.type}`);
 
                     sendAudioForTranscription(audioBlob, filenameForApi);
@@ -415,12 +449,11 @@ async function sendAudioForTranscription(audioBlob, filename) {
         let displayErrorMessage = "Errore trascrizione.";
         const rawErrorMessage = error && error.message ? error.message : "Errore sconosciuto trascrizione";
         console.error('[sendAudioForTranscription] Errore completo (VAD):', rawErrorMessage, error);
-        if (rawErrorMessage.toLowerCase().includes("invalid file format") || 
-            rawErrorMessage.toLowerCase().includes("format is not supported") || 
+        if (rawErrorMessage.toLowerCase().includes("invalid file format") ||
+            rawErrorMessage.toLowerCase().includes("format is not supported") ||
             rawErrorMessage.toLowerCase().includes("could not be decoded") ||
             rawErrorMessage.includes("[OpenAI Code:")) {
-            // L'errore include già il codice 400 e il messaggio di OpenAI
-            displayErrorMessage = `Errore formato audio: ${rawErrorMessage}`; // Mantieni messaggio originale se è già specifico
+            displayErrorMessage = `Errore formato audio: ${rawErrorMessage}`;
         } else {
             displayErrorMessage = rawErrorMessage;
         }
@@ -564,7 +597,7 @@ function resumeListeningAfterFernanda() {
             } else {
                 startVAD();
             }
-        }, 100);
+        }, 100); // Breve timeout per permettere la chiusura di risorse precedenti se necessario
     } else {
         console.log("resumeListeningAfterFernanda: sessione non attiva/valida o terminata.");
         if (!globalStream && currentConversationState !== 'idle') {
@@ -590,10 +623,11 @@ async function handleControlButtonClick() {
                 console.warn("Silent audio play() for unlocking failed or interrupted:", err.name, err.message, "(This is often not critical if main interaction proceeds)");
             })
             .finally(() => {
-                unlockAudioPlayer = null; 
+                unlockAudioPlayer = null;
             });
     }
-    
+
+    // Resume AudioContext se sospeso (importante per i browser mobili)
     if (audioContext && audioContext.state === 'suspended') {
         console.log("AudioContext (VAD) sospeso. Tentativo resume...");
         try {
@@ -601,6 +635,7 @@ async function handleControlButtonClick() {
             console.log("AudioContext (VAD) resumed by user interaction.");
         } catch (e) {
             console.warn("Could not resume AudioContext (VAD) on click:", e);
+            // Non bloccare l'azione successiva, potrebbe funzionare comunque o initializeAudioProcessing lo gestirà
         }
     }
 
@@ -613,16 +648,19 @@ async function handleControlButtonClick() {
     if (currentConversationState === 'idle') {
         isTransitioningAudio = true;
         updateUI('idle', 'Avvio...', 'icon-mic', 'Inizializzazione audio...');
-        const ready = await initializeAudioProcessing();
+        const ready = await initializeAudioProcessing(); // Questo ora imposta `recordingMimeType` con un preferito o lo lascia vuoto
         if (ready) {
-            startVAD();
+            startVAD(); // startVAD catturerà il MIME effettivo da MediaRecorder
         } else {
             isTransitioningAudio = false;
+            // updateUI è già stato chiamato da initializeAudioProcessing in caso di errore
         }
     } else if (currentConversationState === 'listening_continuous' || currentConversationState === 'processing_vad_chunk') {
         console.log("User requested stop session.");
         isTransitioningAudio = true;
-        updateUI(currentConversationState, 'Stop...', controlButton.querySelector('span').className, 'Terminazione sessione...');
+        // Mantieni l'icona che c'era, per evitare flash visivi se era 'icon-thinking'
+        const currentIconClass = controlButton.querySelector('span') ? controlButton.querySelector('span').className : 'icon-stop';
+        updateUI(currentConversationState, 'Stop...', currentIconClass, 'Terminazione sessione...');
         cleanUpFullSession();
     } else if (currentConversationState === 'fernanda_speaking_continuous') {
         console.log("User requested interrupt Fernanda.");
@@ -630,7 +668,7 @@ async function handleControlButtonClick() {
         updateUI('fernanda_speaking_continuous', 'Stop...', 'icon-stop', 'Interrompo Fernanda...');
         if (currentAudio) {
             currentAudio.pause();
-            currentAudio.currentTime = 0;
+            // currentAudio.currentTime = 0; // Non necessario se si revoca l'URL subito dopo
             if (currentAudio.src && currentAudio.src.startsWith('blob:')) URL.revokeObjectURL(currentAudio.src);
             currentAudio = null;
         }
@@ -641,7 +679,6 @@ async function handleControlButtonClick() {
 
 document.addEventListener('DOMContentLoaded', () => {
     console.log("DOM caricato. User Agent:", navigator.userAgent);
-    // Verifica supporto MediaRecorder e getUserMedia
     let mediaRecorderSupported = typeof MediaRecorder !== 'undefined';
     let getUserMediaSupported = navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
 
